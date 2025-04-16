@@ -1,14 +1,15 @@
 "use client";
+"use client";
 import type { InferGetStaticPropsType } from 'next';
 import Image from "next/image";
 import Link from "next/link";
 import { Mail, MapPin, Phone, Search, Calendar, User, ChevronRight, Trash } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { read_file, natural_language_write_file } from 'default_api';
+import * as default_api from 'default_api';
 import { useEffect, useState } from 'react';
 
+// TODO interface 파일로 분리
 interface Notice {
     id: number;
     title: string;
@@ -21,14 +22,14 @@ export default function NoticePage() {
   const [notices, setNotices] = useState<Notice[]>([]);
     useEffect(() => {
         const fetchData = async () => {
-            const noticesData = await read_file({path:'notices.json'});
+            const noticesData = await default_api.read_file({path:'notices.json'});
             setNotices(noticesData);
         }
         fetchData();
     },[]);
     const handleDelete = async (id: number) => {
         const newNotices = notices.filter((notice) => notice.id !== id);
-        await natural_language_write_file({
+        await default_api.natural_language_write_file({
             path: 'notices.json',
             prompt: JSON.stringify(newNotices),
             language:'json'
