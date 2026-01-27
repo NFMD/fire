@@ -132,6 +132,108 @@ class SettingsPanel(QWidget):
 
         scroll_layout.addWidget(rotation_group)
 
+        # === Advanced Analysis (Gatan DM Style) ===
+        advanced_group = QGroupBox("Advanced Analysis (Gatan DM Style)")
+        advanced_layout = QVBoxLayout(advanced_group)
+
+        # Line Profile Methods
+        profile_label = QLabel("Line Profile Methods:")
+        profile_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        advanced_layout.addWidget(profile_label)
+
+        self.profile_checks = {}
+        profile_methods = [
+            ('fwhm', 'FWHM (Full Width Half Max)', True),
+            ('10-90', '10-90% Threshold', True),
+            ('derivative', 'Derivative Peak', True),
+            ('sigmoid', 'Sigmoid Fitting', False),
+        ]
+
+        for key, label, default in profile_methods:
+            cb = QCheckBox(label)
+            cb.setChecked(default)
+            cb.stateChanged.connect(self._on_settings_changed)
+            self.profile_checks[key] = cb
+            advanced_layout.addWidget(cb)
+
+        # Background Subtraction
+        bg_label = QLabel("Background Subtraction:")
+        bg_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        advanced_layout.addWidget(bg_label)
+
+        bg_form = QFormLayout()
+        self.background_combo = QComboBox()
+        self.background_combo.addItems([
+            'None',
+            'Rolling Ball',
+            'Polynomial Fit',
+            'Top-Hat',
+            'Gaussian'
+        ])
+        self.background_combo.setCurrentIndex(1)  # Rolling Ball default
+        self.background_combo.setToolTip("Background subtraction method")
+        bg_form.addRow("Method:", self.background_combo)
+        advanced_layout.addLayout(bg_form)
+
+        # Calibration
+        cal_label = QLabel("Scale Calibration:")
+        cal_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        advanced_layout.addWidget(cal_label)
+
+        self.fft_calibration_cb = QCheckBox("FFT-based scale calibration")
+        self.fft_calibration_cb.setChecked(False)
+        self.fft_calibration_cb.setToolTip("Calibrate scale using known lattice spacing")
+        advanced_layout.addWidget(self.fft_calibration_cb)
+
+        cal_form = QFormLayout()
+        self.lattice_spacing_spin = QDoubleSpinBox()
+        self.lattice_spacing_spin.setRange(0.0, 10.0)
+        self.lattice_spacing_spin.setValue(0.0)
+        self.lattice_spacing_spin.setSingleStep(0.01)
+        self.lattice_spacing_spin.setDecimals(3)
+        self.lattice_spacing_spin.setToolTip("Known lattice spacing for calibration (nm). 0 = disabled")
+        cal_form.addRow("Lattice (nm):", self.lattice_spacing_spin)
+        advanced_layout.addLayout(cal_form)
+
+        # Drift Correction
+        self.drift_correction_cb = QCheckBox("Drift correction")
+        self.drift_correction_cb.setChecked(True)
+        self.drift_correction_cb.setToolTip("Correct for sample drift between measurements")
+        advanced_layout.addWidget(self.drift_correction_cb)
+
+        # Sub-pixel Interpolation
+        interp_form = QFormLayout()
+        self.interpolation_spin = QSpinBox()
+        self.interpolation_spin.setRange(1, 20)
+        self.interpolation_spin.setValue(10)
+        self.interpolation_spin.setToolTip("Sub-pixel interpolation factor (higher = more precise)")
+        interp_form.addRow("Interpolation:", self.interpolation_spin)
+        advanced_layout.addLayout(interp_form)
+
+        # Statistical Analysis
+        stats_label = QLabel("Statistical Analysis:")
+        stats_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        advanced_layout.addWidget(stats_label)
+
+        self.outlier_combo = QComboBox()
+        self.outlier_combo.addItems([
+            'IQR (Interquartile)',
+            'MAD (Median Absolute)',
+            'Z-Score',
+            'Grubbs Test'
+        ])
+        self.outlier_combo.setToolTip("Outlier rejection method")
+        stats_form = QFormLayout()
+        stats_form.addRow("Outlier Reject:", self.outlier_combo)
+        advanced_layout.addLayout(stats_form)
+
+        self.bootstrap_ci_cb = QCheckBox("Bootstrap 95% CI")
+        self.bootstrap_ci_cb.setChecked(True)
+        self.bootstrap_ci_cb.setToolTip("Calculate 95% confidence interval using bootstrap")
+        advanced_layout.addWidget(self.bootstrap_ci_cb)
+
+        scroll_layout.addWidget(advanced_group)
+
         # Consensus settings
         consensus_group = QGroupBox("Consensus")
         consensus_layout = QFormLayout(consensus_group)
@@ -236,6 +338,34 @@ class SettingsPanel(QWidget):
             'trimmed_mean'
         )
 
+        # Get enabled profile methods
+        profile_methods = [k for k, cb in self.profile_checks.items() if cb.isChecked()]
+
+        # Map background method
+        background_map = {
+            'None': 'none',
+            'Rolling Ball': 'rolling_ball',
+            'Polynomial Fit': 'polynomial',
+            'Top-Hat': 'tophat',
+            'Gaussian': 'gaussian',
+        }
+        background_method = background_map.get(
+            self.background_combo.currentText(),
+            'rolling_ball'
+        )
+
+        # Map outlier method
+        outlier_map = {
+            'IQR (Interquartile)': 'iqr',
+            'MAD (Median Absolute)': 'mad',
+            'Z-Score': 'zscore',
+            'Grubbs Test': 'grubbs',
+        }
+        outlier_method = outlier_map.get(
+            self.outlier_combo.currentText(),
+            'iqr'
+        )
+
         return {
             'depths_nm': depths,
             'baseline_y': self.baseline_spin.value() if self.baseline_spin.value() > 0 else None,
@@ -250,6 +380,15 @@ class SettingsPanel(QWidget):
             'output_dir': self.output_edit.text() or None,
             'save_json': self.save_json_cb.isChecked(),
             'save_csv': self.save_csv_cb.isChecked(),
+            # Advanced settings (Gatan DM style)
+            'profile_methods': profile_methods,
+            'background_method': background_method,
+            'fft_calibration': self.fft_calibration_cb.isChecked(),
+            'lattice_spacing_nm': self.lattice_spacing_spin.value() if self.lattice_spacing_spin.value() > 0 else None,
+            'drift_correction': self.drift_correction_cb.isChecked(),
+            'interpolation_factor': self.interpolation_spin.value(),
+            'outlier_method': outlier_method,
+            'bootstrap_ci': self.bootstrap_ci_cb.isChecked(),
         }
 
     def set_settings(self, settings: Dict[str, Any]):

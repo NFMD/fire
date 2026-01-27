@@ -7,7 +7,19 @@ from .baseline_detector import BaselineDetector
 from .thickness_measurer import ThicknessMeasurer, MeasurementResult
 from .result_exporter import ResultExporter
 
+# Advanced analysis (Gatan DM-style features)
+from .advanced_analysis import (
+    LineProfileAnalyzer,
+    FFTAnalyzer,
+    DriftCorrector,
+    BackgroundSubtractor,
+    IntensityCalibrator,
+    StatisticalAnalyzer,
+)
+from .enhanced_measurer import EnhancedCDMeasurer, EnhancedMeasurementResult, HybridMeasurer
+
 __all__ = [
+    # Basic modules
     'TIFFLoader',
     'ScaleInfo',
     'ImagePreprocessor',
@@ -15,4 +27,14 @@ __all__ = [
     'ThicknessMeasurer',
     'MeasurementResult',
     'ResultExporter',
+    # Advanced analysis
+    'LineProfileAnalyzer',
+    'FFTAnalyzer',
+    'DriftCorrector',
+    'BackgroundSubtractor',
+    'IntensityCalibrator',
+    'StatisticalAnalyzer',
+    'EnhancedCDMeasurer',
+    'EnhancedMeasurementResult',
+    'HybridMeasurer',
 ]
