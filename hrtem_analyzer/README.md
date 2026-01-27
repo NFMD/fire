@@ -68,7 +68,28 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### Single Image Analysis
+### Graphical User Interface (GUI)
+
+The easiest way to use HR-TEM Analyzer is through the GUI:
+
+```bash
+python scripts/run_gui.py
+```
+
+**GUI Features:**
+- Drag & drop TIFF images
+- Interactive baseline (0-point) selection with click
+- Real-time image preview with zoom/pan
+- Configure all measurement parameters
+- Visual progress tracking
+- Results table with statistics
+- Export to JPEG/JSON/CSV
+
+![GUI Screenshot](docs/gui_screenshot.png)
+
+### Command Line Interface (CLI)
+
+#### Single Image Analysis
 
 ```bash
 python scripts/analyze.py single sample.tiff -o results/ -d 5 10 15 20
