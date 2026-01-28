@@ -234,6 +234,74 @@ class SettingsPanel(QWidget):
 
         scroll_layout.addWidget(advanced_group)
 
+        # === Precision Measurement ===
+        precision_group = QGroupBox("Precision Measurement")
+        precision_layout = QVBoxLayout(precision_group)
+
+        self.precision_mode_cb = QCheckBox("Enable Precision Mode")
+        self.precision_mode_cb.setChecked(True)
+        self.precision_mode_cb.setToolTip("Enable sub-pixel, ESF/LSF, wavelet, Monte Carlo analysis")
+        precision_layout.addWidget(self.precision_mode_cb)
+
+        # Sub-pixel method
+        subpixel_form = QFormLayout()
+        self.subpixel_combo = QComboBox()
+        self.subpixel_combo.addItems([
+            'Gaussian',
+            'Parabolic',
+            'Centroid',
+            'Spline'
+        ])
+        self.subpixel_combo.setToolTip("Sub-pixel edge localization method")
+        subpixel_form.addRow("Sub-pixel:", self.subpixel_combo)
+        precision_layout.addLayout(subpixel_form)
+
+        # Denoising
+        denoise_label = QLabel("Advanced Denoising:")
+        denoise_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        precision_layout.addWidget(denoise_label)
+
+        denoise_form = QFormLayout()
+        self.denoise_combo = QComboBox()
+        self.denoise_combo.addItems([
+            'Non-local Means',
+            'Bilateral',
+            'Wavelet',
+            'Anisotropic Diffusion'
+        ])
+        self.denoise_combo.setToolTip("Advanced denoising method for noise reduction")
+        denoise_form.addRow("Method:", self.denoise_combo)
+
+        self.denoise_strength_spin = QDoubleSpinBox()
+        self.denoise_strength_spin.setRange(0.0, 2.0)
+        self.denoise_strength_spin.setValue(1.0)
+        self.denoise_strength_spin.setSingleStep(0.1)
+        self.denoise_strength_spin.setToolTip("Denoising strength (0=off, 1=normal, 2=strong)")
+        denoise_form.addRow("Strength:", self.denoise_strength_spin)
+        precision_layout.addLayout(denoise_form)
+
+        # Monte Carlo
+        mc_label = QLabel("Monte Carlo Uncertainty:")
+        mc_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        precision_layout.addWidget(mc_label)
+
+        mc_form = QFormLayout()
+        self.mc_simulations_spin = QSpinBox()
+        self.mc_simulations_spin.setRange(100, 5000)
+        self.mc_simulations_spin.setValue(500)
+        self.mc_simulations_spin.setSingleStep(100)
+        self.mc_simulations_spin.setToolTip("Number of Monte Carlo simulations for uncertainty estimation")
+        mc_form.addRow("Simulations:", self.mc_simulations_spin)
+        precision_layout.addLayout(mc_form)
+
+        # Atomic column fitting (for crystalline materials)
+        self.atomic_fitting_cb = QCheckBox("Atomic column fitting")
+        self.atomic_fitting_cb.setChecked(False)
+        self.atomic_fitting_cb.setToolTip("Fit Gaussian to atomic columns (for crystalline materials)")
+        precision_layout.addWidget(self.atomic_fitting_cb)
+
+        scroll_layout.addWidget(precision_group)
+
         # Consensus settings
         consensus_group = QGroupBox("Consensus")
         consensus_layout = QFormLayout(consensus_group)
@@ -366,6 +434,30 @@ class SettingsPanel(QWidget):
             'iqr'
         )
 
+        # Map subpixel method
+        subpixel_map = {
+            'Gaussian': 'gaussian',
+            'Parabolic': 'parabolic',
+            'Centroid': 'centroid',
+            'Spline': 'spline',
+        }
+        subpixel_method = subpixel_map.get(
+            self.subpixel_combo.currentText(),
+            'gaussian'
+        )
+
+        # Map denoising method
+        denoise_map = {
+            'Non-local Means': 'nlm',
+            'Bilateral': 'bilateral',
+            'Wavelet': 'wavelet',
+            'Anisotropic Diffusion': 'anisotropic',
+        }
+        denoise_method = denoise_map.get(
+            self.denoise_combo.currentText(),
+            'nlm'
+        )
+
         return {
             'depths_nm': depths,
             'baseline_y': self.baseline_spin.value() if self.baseline_spin.value() > 0 else None,
@@ -389,6 +481,13 @@ class SettingsPanel(QWidget):
             'interpolation_factor': self.interpolation_spin.value(),
             'outlier_method': outlier_method,
             'bootstrap_ci': self.bootstrap_ci_cb.isChecked(),
+            # Precision measurement settings
+            'precision_mode': self.precision_mode_cb.isChecked(),
+            'subpixel_method': subpixel_method,
+            'denoise_method': denoise_method,
+            'denoise_strength': self.denoise_strength_spin.value(),
+            'mc_simulations': self.mc_simulations_spin.value(),
+            'atomic_fitting': self.atomic_fitting_cb.isChecked(),
         }
 
     def set_settings(self, settings: Dict[str, Any]):

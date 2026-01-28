@@ -94,6 +94,14 @@ class PipelineConfig:
     outlier_method: str = 'iqr'  # 'iqr', 'mad', 'zscore', 'grubbs'
     bootstrap_ci: bool = True
 
+    # === Precision Measurement ===
+    precision_mode: bool = True  # Enable sub-pixel, ESF/LSF, wavelet, Monte Carlo
+    subpixel_method: str = 'gaussian'  # 'gaussian', 'parabolic', 'centroid', 'spline'
+    denoise_method: str = 'nlm'  # 'nlm', 'bilateral', 'wavelet', 'anisotropic'
+    denoise_strength: float = 1.0  # 0-2 (0=off, 1=normal, 2=strong)
+    mc_simulations: int = 500  # Number of Monte Carlo simulations
+    atomic_fitting: bool = False  # Atomic column fitting for crystalline materials
+
 
 class InferencePipeline:
     """
@@ -131,13 +139,20 @@ class InferencePipeline:
         )
         self.multi_measurer = MultiVariantMeasurer(self.thickness_measurer)
 
-        # Enhanced measurer (Gatan DM-style)
+        # Enhanced measurer (Gatan DM-style + precision measurement)
         self.enhanced_measurer = EnhancedCDMeasurer(
             interpolation_factor=self.config.interpolation_factor,
             background_method=self.config.background_method,
             use_drift_correction=self.config.drift_correction,
             calibrate_with_fft=self.config.fft_calibration,
-            known_lattice_spacing_nm=self.config.lattice_spacing_nm
+            known_lattice_spacing_nm=self.config.lattice_spacing_nm,
+            # Precision measurement options
+            use_precision_mode=self.config.precision_mode,
+            subpixel_method=self.config.subpixel_method,
+            denoising_method=self.config.denoise_method,
+            denoising_strength=self.config.denoise_strength,
+            monte_carlo_simulations=self.config.mc_simulations,
+            enable_atomic_fitting=self.config.atomic_fitting
         )
 
         # FFT analyzer for additional analysis

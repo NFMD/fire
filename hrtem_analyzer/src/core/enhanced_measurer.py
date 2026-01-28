@@ -7,6 +7,7 @@ Integrates advanced analysis techniques for high-precision measurements:
 - Background subtraction
 - Drift correction
 - Robust statistical analysis
+- Precision measurement (sub-pixel, ESF/LSF, wavelet, Monte Carlo)
 """
 import numpy as np
 from dataclasses import dataclass, field
@@ -29,6 +30,17 @@ from .thickness_measurer import (
     MeasurementResult,
     SingleMeasurement,
     EdgePoint
+)
+from .precision_measurement import (
+    PrecisionCDMeasurer,
+    PrecisionMeasurementResult,
+    SubPixelMethod,
+    SubPixelEdgeDetector,
+    ESFLSFAnalyzer,
+    AdvancedDenoiser,
+    MultiScaleWaveletAnalyzer,
+    MonteCarloUncertainty,
+    AtomicColumnFitter
 )
 
 
@@ -55,6 +67,15 @@ class EnhancedMeasurementResult(MeasurementResult):
     # Method breakdown
     method_results: Dict[str, float] = field(default_factory=dict)
 
+    # Precision measurement fields
+    sub_pixel_positions: Optional[List[float]] = None
+    esf_width_nm: Optional[float] = None
+    lsf_fwhm_nm: Optional[float] = None
+    snr_db: Optional[float] = None
+    monte_carlo_std: Optional[float] = None
+    atomic_spacing_nm: Optional[float] = None
+    precision_confidence: Optional[float] = None
+
 
 class EnhancedCDMeasurer:
     """
@@ -75,7 +96,14 @@ class EnhancedCDMeasurer:
             background_method: str = 'rolling_ball',
             use_drift_correction: bool = True,
             calibrate_with_fft: bool = True,
-            known_lattice_spacing_nm: Optional[float] = None
+            known_lattice_spacing_nm: Optional[float] = None,
+            # Precision measurement options
+            use_precision_mode: bool = True,
+            subpixel_method: str = 'gaussian',
+            denoising_method: str = 'nlm',
+            denoising_strength: float = 1.0,
+            monte_carlo_simulations: int = 500,
+            enable_atomic_fitting: bool = False
     ):
         """
         Initialize enhanced measurer.
@@ -86,18 +114,36 @@ class EnhancedCDMeasurer:
             use_drift_correction: Enable drift correction
             calibrate_with_fft: Use FFT for scale calibration
             known_lattice_spacing_nm: Known lattice spacing for calibration
+            use_precision_mode: Enable precision measurement features
+            subpixel_method: 'gaussian', 'parabolic', 'centroid', 'spline'
+            denoising_method: 'nlm', 'bilateral', 'wavelet', 'anisotropic'
+            denoising_strength: Denoising strength (0-2)
+            monte_carlo_simulations: Number of MC simulations for uncertainty
+            enable_atomic_fitting: Enable atomic column fitting
         """
         self.interpolation_factor = interpolation_factor
         self.background_method = background_method
         self.use_drift_correction = use_drift_correction
         self.calibrate_with_fft = calibrate_with_fft
         self.known_lattice_spacing = known_lattice_spacing_nm
+        self.use_precision_mode = use_precision_mode
 
         # Initialize analyzers
         self.line_analyzer = LineProfileAnalyzer(interpolation_factor=interpolation_factor)
         self.fft_analyzer = FFTAnalyzer()
         self.drift_corrector = DriftCorrector()
         self.intensity_calibrator = IntensityCalibrator()
+
+        # Initialize precision measurement components
+        subpixel_enum = getattr(SubPixelMethod, subpixel_method.upper(), SubPixelMethod.GAUSSIAN)
+        self.precision_measurer = PrecisionCDMeasurer(
+            subpixel_method=subpixel_enum,
+            denoising_method=denoising_method,
+            denoising_strength=denoising_strength,
+            monte_carlo_simulations=monte_carlo_simulations,
+            enable_atomic_fitting=enable_atomic_fitting,
+            expected_lattice_nm=known_lattice_spacing_nm
+        )
 
         # State
         self._reference_set = False
@@ -317,6 +363,47 @@ class EnhancedCDMeasurer:
             left_edge_x = int(center_x - half_width_px)
             right_edge_x = int(center_x + half_width_px)
 
+        # Precision measurement (sub-pixel, ESF/LSF, wavelet, Monte Carlo)
+        precision_result = None
+        if self.use_precision_mode:
+            try:
+                precision_result = self.precision_measurer.measure_cd(
+                    image=image,
+                    profile_y=center_y,
+                    scale_nm_per_pixel=scale_nm_per_pixel,
+                    profile_width=averaging_width * num_profiles
+                )
+
+                # Merge precision results with multi-method results
+                if precision_result.confidence_level > 0.5:
+                    # Weight precision measurement into final result
+                    precision_weight = 0.3
+                    multi_method_weight = 0.7
+
+                    if precision_result.thickness_nm > 0:
+                        final_mean = (
+                            multi_method_weight * final_mean +
+                            precision_weight * precision_result.thickness_nm
+                        )
+
+                    # Update uncertainty with precision estimate
+                    if precision_result.uncertainty_nm < float('inf'):
+                        final_std = min(final_std, precision_result.uncertainty_nm)
+
+                    # Update confidence interval
+                    if precision_result.ci_95_low > 0:
+                        ci_lower = min(ci_lower, precision_result.ci_95_low)
+                        ci_upper = max(ci_upper, precision_result.ci_95_high)
+
+                    logger.debug(
+                        f"Precision measurement: {precision_result.thickness_nm:.3f}nm "
+                        f"± {precision_result.uncertainty_nm:.3f}nm "
+                        f"(SNR: {precision_result.snr_db:.1f}dB)"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Precision measurement failed: {e}")
+
         return EnhancedMeasurementResult(
             depth_nm=depth_nm,
             thickness_nm=final_mean,
@@ -338,7 +425,15 @@ class EnhancedCDMeasurer:
             background_corrected=self.background_method != 'none',
             measurement_uncertainty_nm=final_std / np.sqrt(len(all_widths)) if all_widths else 0,
             confidence_interval_95=(ci_lower, ci_upper),
-            method_results=method_results
+            method_results=method_results,
+            # Precision measurement fields
+            sub_pixel_positions=precision_result.sub_pixel_positions if precision_result else None,
+            esf_width_nm=precision_result.esf_width_nm if precision_result else None,
+            lsf_fwhm_nm=precision_result.lsf_fwhm_nm if precision_result else None,
+            snr_db=precision_result.snr_db if precision_result else None,
+            monte_carlo_std=precision_result.uncertainty_nm if precision_result else None,
+            atomic_spacing_nm=precision_result.atomic_spacing_nm if precision_result else None,
+            precision_confidence=precision_result.confidence_level if precision_result else None
         )
 
     def measure_all_depths(

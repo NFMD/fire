@@ -18,6 +18,19 @@ from .advanced_analysis import (
 )
 from .enhanced_measurer import EnhancedCDMeasurer, EnhancedMeasurementResult, HybridMeasurer
 
+# Precision measurement (sub-pixel, ESF/LSF, wavelet, Monte Carlo)
+from .precision_measurement import (
+    PrecisionCDMeasurer,
+    PrecisionMeasurementResult,
+    SubPixelMethod,
+    SubPixelEdgeDetector,
+    ESFLSFAnalyzer,
+    AdvancedDenoiser,
+    MultiScaleWaveletAnalyzer,
+    MonteCarloUncertainty,
+    AtomicColumnFitter,
+)
+
 __all__ = [
     # Basic modules
     'TIFFLoader',
@@ -37,4 +50,14 @@ __all__ = [
     'EnhancedCDMeasurer',
     'EnhancedMeasurementResult',
     'HybridMeasurer',
+    # Precision measurement
+    'PrecisionCDMeasurer',
+    'PrecisionMeasurementResult',
+    'SubPixelMethod',
+    'SubPixelEdgeDetector',
+    'ESFLSFAnalyzer',
+    'AdvancedDenoiser',
+    'MultiScaleWaveletAnalyzer',
+    'MonteCarloUncertainty',
+    'AtomicColumnFitter',
 ]

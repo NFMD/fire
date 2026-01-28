@@ -72,6 +72,13 @@ class AnalysisWorker(QThread):
                 interpolation_factor=self.settings.get('interpolation_factor', 10),
                 outlier_method=self.settings.get('outlier_method', 'iqr'),
                 bootstrap_ci=self.settings.get('bootstrap_ci', True),
+                # Precision measurement settings
+                precision_mode=self.settings.get('precision_mode', True),
+                subpixel_method=self.settings.get('subpixel_method', 'gaussian'),
+                denoise_method=self.settings.get('denoise_method', 'nlm'),
+                denoise_strength=self.settings.get('denoise_strength', 1.0),
+                mc_simulations=self.settings.get('mc_simulations', 500),
+                atomic_fitting=self.settings.get('atomic_fitting', False),
             )
 
             # Create output directory

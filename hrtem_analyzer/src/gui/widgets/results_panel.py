@@ -353,6 +353,52 @@ class ResultsPanel(QWidget):
                         f"{fft_analysis['lattice_constant_nm']:.3f} nm"
                     ))
 
+            # Precision measurement results
+            if 'measurements' in result:
+                for depth, m in sorted(result['measurements'].items()):
+                    depth_val = float(depth) if isinstance(depth, str) else depth
+
+                    # ESF/LSF analysis
+                    if 'esf_width_nm' in m and m['esf_width_nm']:
+                        rows.append((
+                            f'  ESF Width @{depth_val:.0f}nm',
+                            f"{m['esf_width_nm']:.3f} nm"
+                        ))
+
+                    if 'lsf_fwhm_nm' in m and m['lsf_fwhm_nm']:
+                        rows.append((
+                            f'  LSF FWHM @{depth_val:.0f}nm',
+                            f"{m['lsf_fwhm_nm']:.3f} nm"
+                        ))
+
+                    # SNR
+                    if 'snr_db' in m and m['snr_db']:
+                        rows.append((
+                            f'  SNR @{depth_val:.0f}nm',
+                            f"{m['snr_db']:.1f} dB"
+                        ))
+
+                    # Monte Carlo uncertainty
+                    if 'monte_carlo_std' in m and m['monte_carlo_std']:
+                        rows.append((
+                            f'  MC Uncertainty @{depth_val:.0f}nm',
+                            f"± {m['monte_carlo_std']:.3f} nm"
+                        ))
+
+                    # Atomic spacing (crystalline materials)
+                    if 'atomic_spacing_nm' in m and m['atomic_spacing_nm']:
+                        rows.append((
+                            f'  Atomic Spacing @{depth_val:.0f}nm',
+                            f"{m['atomic_spacing_nm']:.3f} nm"
+                        ))
+
+                    # Precision confidence
+                    if 'precision_confidence' in m and m['precision_confidence']:
+                        rows.append((
+                            f'  Precision Conf @{depth_val:.0f}nm',
+                            f"{m['precision_confidence']:.1%}"
+                        ))
+
         else:
             rows.append(('Error', result.get('error', 'Unknown')))
 
