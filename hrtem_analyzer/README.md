@@ -61,10 +61,74 @@ Automated Critical Dimension (CD) measurement system for High-Resolution Transmi
 
 ## Installation
 
+### Option 1: Standalone Executable (No Python Required)
+
+Download the pre-built executable for your platform:
+- **Windows**: `HRTEM-Analyzer.exe`
+- **macOS**: `HRTEM-Analyzer.app`
+- **Linux**: `HRTEM-Analyzer`
+
+Just double-click to run - no installation needed!
+
+### Option 2: Quick Install Script
+
+**Linux/macOS:**
 ```bash
 cd hrtem_analyzer
-pip install -r requirements.txt
+chmod +x scripts/install.sh
+./scripts/install.sh
 ```
+
+**Windows:**
+```cmd
+cd hrtem_analyzer
+scripts\install.bat
+```
+
+### Option 3: pip Install
+
+```bash
+cd hrtem_analyzer
+
+# Standard installation (with GUI)
+pip install -r requirements.txt
+pip install -e .
+
+# Or minimal (CLI only)
+pip install -r requirements-minimal.txt
+pip install -e .
+
+# Or full installation (all features)
+pip install -e ".[full]"
+```
+
+### Option 4: Install from PyPI (Coming Soon)
+
+```bash
+pip install hrtem-analyzer
+pip install hrtem-analyzer[gui]    # with GUI
+pip install hrtem-analyzer[full]   # all features
+```
+
+## Building Standalone Executable
+
+To create an executable for distribution:
+
+```bash
+# Install PyInstaller
+pip install pyinstaller
+
+# Build directory distribution (recommended)
+python scripts/build_executable.py
+
+# Or single file (slower startup but easier to share)
+python scripts/build_executable.py --onefile
+
+# With clean build
+python scripts/build_executable.py --clean
+```
+
+The executable will be in the `dist/` folder.
 
 ## Quick Start
 
@@ -228,12 +292,55 @@ Total: Up to **5 × 7 × 6 × 7 = 1,470 individual measurements** per depth, agg
 - Automatic garbage collection between batches
 - Memory monitoring with configurable limits
 
+## Advanced Features
+
+### Gatan Digital Micrograph-Style Analysis
+- **Line Profile Analysis**: FWHM, 10-90% threshold, derivative-based, sigmoid fitting
+- **FFT Calibration**: Automatic scale verification using known lattice spacing
+- **Background Subtraction**: Rolling ball, polynomial, top-hat, gaussian
+- **Drift Correction**: Cross-correlation based drift compensation
+
+### Precision Measurement Mode
+- **Sub-pixel Edge Detection**: Gaussian, parabolic, centroid, spline interpolation
+- **ESF/LSF Analysis**: Edge Spread Function and Line Spread Function analysis
+- **Advanced Denoising**: Non-local means, bilateral, wavelet, anisotropic diffusion
+- **Multi-scale Wavelet**: Robust edge detection across multiple scales
+- **Monte Carlo Uncertainty**: Statistical uncertainty quantification
+- **Atomic Column Fitting**: For crystalline materials
+
 ## Requirements
 
-- Python 3.8+
-- numpy, opencv-python, tifffile, scikit-image
-- scipy (for statistics)
-- loguru (for logging)
+### Minimum Requirements (CLI)
+- Python 3.9+
+- numpy, opencv-python, Pillow, tifffile, scipy, loguru
+
+### GUI Requirements
+- PyQt6 >= 6.5.0
+
+### Full Features
+- PyWavelets (for wavelet analysis)
+- scikit-image (for additional algorithms)
+
+## Distribution to Others
+
+### For Users Without Python
+
+1. Build the executable:
+   ```bash
+   python scripts/build_executable.py
+   ```
+
+2. Share the `dist/HRTEM-Analyzer` folder or `HRTEM-Analyzer.exe`
+
+3. Users can run it directly without installing anything
+
+### For Users With Python
+
+Share a ZIP with instructions to run:
+```bash
+pip install -r requirements.txt
+python scripts/run_gui.py
+```
 
 ## License
 
