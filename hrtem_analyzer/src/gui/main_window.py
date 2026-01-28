@@ -19,7 +19,8 @@ from .widgets import (
     FileListWidget,
     SettingsPanel,
     ResultsPanel,
-    MeasurementTableWidget
+    MeasurementTableWidget,
+    FFTViewerWidget
 )
 
 
@@ -48,6 +49,9 @@ class AnalysisWorker(QThread):
 
             from pipeline.inference_pipeline import InferencePipeline, PipelineConfig
 
+            # Determine if using enhanced analysis
+            use_enhanced = bool(self.settings.get('profile_methods'))
+
             # Create pipeline config from settings
             config = PipelineConfig(
                 depths_nm=self.settings.get('depths_nm', [5, 10, 15, 20]),
@@ -58,6 +62,16 @@ class AnalysisWorker(QThread):
                     ['sobel', 'canny', 'gradient']),
                 max_workers=self.settings.get('max_workers', 4),
                 consensus_method=self.settings.get('consensus_method', 'trimmed_mean'),
+                # Advanced Gatan DM-style settings
+                use_enhanced_analysis=use_enhanced,
+                profile_methods=self.settings.get('profile_methods', ['fwhm', '10-90', 'derivative']),
+                background_method=self.settings.get('background_method', 'rolling_ball'),
+                fft_calibration=self.settings.get('fft_calibration', False),
+                lattice_spacing_nm=self.settings.get('lattice_spacing_nm'),
+                drift_correction=self.settings.get('drift_correction', True),
+                interpolation_factor=self.settings.get('interpolation_factor', 10),
+                outlier_method=self.settings.get('outlier_method', 'iqr'),
+                bootstrap_ci=self.settings.get('bootstrap_ci', True),
             )
 
             # Create output directory
@@ -73,14 +87,16 @@ class AnalysisWorker(QThread):
                 if self._is_cancelled:
                     break
 
-                self.progress.emit(i, total, f"Processing {Path(path).name}...")
+                mode_str = "(Enhanced)" if use_enhanced else "(Standard)"
+                self.progress.emit(i, total, f"Processing {Path(path).name} {mode_str}...")
 
                 try:
                     result = pipeline.process_single(
                         image_path=path,
                         baseline_hint_y=self.settings.get('baseline_y'),
                         depths_nm=self.settings.get('depths_nm', [5, 10, 15, 20]),
-                        save_result=True
+                        save_result=True,
+                        use_enhanced=use_enhanced
                     )
                     results.append(result)
                     self.image_completed.emit(result)
@@ -157,6 +173,10 @@ class MainWindow(QMainWindow):
         # Image viewer tab
         self.image_viewer = ImageViewerWidget()
         self.view_tabs.addTab(self.image_viewer, "Image View")
+
+        # FFT Analysis tab
+        self.fft_viewer = FFTViewerWidget()
+        self.view_tabs.addTab(self.fft_viewer, "FFT Analysis")
 
         # Results tab
         self.results_panel = ResultsPanel()
@@ -342,6 +362,15 @@ class MainWindow(QMainWindow):
         self.image_viewer.baseline_changed.connect(self._on_baseline_changed)
         self.image_viewer.position_changed.connect(self._on_position_changed)
 
+        # FFT viewer signals
+        self.fft_viewer.calibration_requested.connect(self._on_fft_calibration)
+
+    def _on_fft_calibration(self, spacing_nm: float):
+        """Handle FFT calibration request"""
+        self.settings_panel.lattice_spacing_spin.setValue(spacing_nm)
+        self.settings_panel.fft_calibration_cb.setChecked(True)
+        self.status_label.setText(f"FFT calibration set: {spacing_nm:.3f} nm")
+
     def _on_open_images(self):
         """Open image files dialog"""
         files, _ = QFileDialog.getOpenFileNames(
@@ -505,6 +534,11 @@ class MainWindow(QMainWindow):
                 result['source_path'],
                 'completed'
             )
+
+            # Update FFT viewer if FFT analysis available
+            if 'fft_analysis' in result:
+                scale = result.get('scale_info', {}).get('scale_nm_per_pixel', 1.0)
+                self.fft_viewer.set_fft_results(result['fft_analysis'], scale)
 
     def _on_export_results(self):
         """Export results to file"""

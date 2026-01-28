@@ -2,6 +2,7 @@
 Results Panel Widget for HR-TEM Analyzer
 
 Displays analysis results with visualization.
+Enhanced to support Gatan DM-style metrics.
 """
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -10,10 +11,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QTabWidget, QScrollArea, QFrame,
-    QGridLayout, QSplitter
+    QGridLayout, QSplitter, QGroupBox, QFormLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPixmap, QImage
+from PyQt6.QtGui import QColor, QPixmap, QImage, QPainter, QPen
 
 try:
     import numpy as np
@@ -63,15 +64,33 @@ class ResultCard(QFrame):
         status_label.setStyleSheet(f"color: {status_color};")
         layout.addWidget(status_label)
 
+        # Analysis mode indicator
+        if success:
+            enhanced = self.result.get('enhanced_analysis', False)
+            mode_text = "Enhanced" if enhanced else "Standard"
+            mode_color = "#17a2b8" if enhanced else "#6c757d"
+            mode_label = QLabel(f"[{mode_text}]")
+            mode_label.setStyleSheet(f"color: {mode_color}; font-size: 10px;")
+            layout.addWidget(mode_label)
+
         # Measurements summary
         if success and 'measurements' in self.result:
             measurements = self.result['measurements']
             for depth, m in sorted(measurements.items()):
                 depth_val = float(depth) if isinstance(depth, str) else depth
+
+                # Basic measurement
                 text = f"@{depth_val:.0f}nm: {m['thickness_nm']:.2f} ± {m['thickness_std']:.2f} nm"
                 m_label = QLabel(text)
                 m_label.setStyleSheet("color: #888888; font-size: 11px;")
                 layout.addWidget(m_label)
+
+                # Show CI95 if available (enhanced mode)
+                if 'ci_95_low' in m and 'ci_95_high' in m:
+                    ci_text = f"  CI95: [{m['ci_95_low']:.2f}, {m['ci_95_high']:.2f}]"
+                    ci_label = QLabel(ci_text)
+                    ci_label.setStyleSheet("color: #17a2b8; font-size: 10px;")
+                    layout.addWidget(ci_label)
 
         elif not success:
             error = self.result.get('error', 'Unknown error')
@@ -274,8 +293,17 @@ class ResultsPanel(QWidget):
         ]
 
         if result.get('success'):
+            # Analysis mode
+            enhanced = result.get('enhanced_analysis', False)
+            rows.append(('Analysis Mode', 'Enhanced (Gatan DM)' if enhanced else 'Standard'))
+
             scale_info = result.get('scale_info', {})
             rows.append(('Scale', f"{scale_info.get('scale_nm_per_pixel', 0):.4f} nm/px"))
+
+            # FFT calibration info if available
+            if result.get('fft_calibration_applied'):
+                fft_scale = result.get('fft_calibrated_scale', 0)
+                rows.append(('FFT Calibrated Scale', f"{fft_scale:.4f} nm/px"))
 
             baseline = result.get('baseline', {})
             rows.append(('Baseline Y', str(baseline.get('y_position', '-'))))
@@ -284,10 +312,47 @@ class ResultsPanel(QWidget):
             if 'measurements' in result:
                 for depth, m in sorted(result['measurements'].items()):
                     depth_val = float(depth) if isinstance(depth, str) else depth
+
+                    # Basic measurement
                     rows.append((
                         f'Thickness @{depth_val:.0f}nm',
                         f"{m['thickness_nm']:.2f} ± {m['thickness_std']:.2f} nm"
                     ))
+
+                    # Enhanced metrics
+                    if 'ci_95_low' in m and 'ci_95_high' in m:
+                        rows.append((
+                            f'  95% CI @{depth_val:.0f}nm',
+                            f"[{m['ci_95_low']:.2f}, {m['ci_95_high']:.2f}] nm"
+                        ))
+
+                    if 'fwhm_nm' in m:
+                        rows.append((
+                            f'  FWHM @{depth_val:.0f}nm',
+                            f"{m['fwhm_nm']:.2f} nm"
+                        ))
+
+                    # Method breakdown if available
+                    if 'method_results' in m:
+                        method_str = ', '.join(
+                            f"{k}: {v:.2f}" for k, v in m['method_results'].items()
+                        )
+                        rows.append((f'  Methods @{depth_val:.0f}nm', method_str))
+
+            # FFT analysis results
+            fft_analysis = result.get('fft_analysis', {})
+            if fft_analysis:
+                if 'dominant_spacing_nm' in fft_analysis:
+                    rows.append((
+                        'FFT Dominant Spacing',
+                        f"{fft_analysis['dominant_spacing_nm']:.3f} nm"
+                    ))
+                if 'lattice_constant_nm' in fft_analysis:
+                    rows.append((
+                        'FFT Lattice Constant',
+                        f"{fft_analysis['lattice_constant_nm']:.3f} nm"
+                    ))
+
         else:
             rows.append(('Error', result.get('error', 'Unknown')))
 

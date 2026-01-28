@@ -2,6 +2,7 @@
 Measurement Table Widget for HR-TEM Analyzer
 
 Displays measurement results in tabular format.
+Enhanced to support Gatan DM-style metrics.
 """
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -9,10 +10,10 @@ from typing import List, Dict, Any, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QPushButton, QComboBox, QCheckBox
+    QPushButton, QComboBox, QCheckBox, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QAction
 
 
 class MeasurementTableWidget(QWidget):
@@ -57,30 +58,41 @@ class MeasurementTableWidget(QWidget):
         self.stats_cb.toggled.connect(self._on_filter_changed)
         controls.addWidget(self.stats_cb)
 
+        # Enhanced mode toggle
+        self.enhanced_cb = QCheckBox("Show Enhanced")
+        self.enhanced_cb.setChecked(True)
+        self.enhanced_cb.setToolTip("Show enhanced metrics (CI95, FWHM)")
+        self.enhanced_cb.toggled.connect(self._on_enhanced_toggled)
+        controls.addWidget(self.enhanced_cb)
+
         layout.addLayout(controls)
 
-        # Table
+        # Table - extended columns for enhanced metrics
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels([
-            'File', 'Depth (nm)', 'Thickness (nm)', 'Std (nm)', 'Confidence', 'N'
-        ])
+        self._base_columns = ['File', 'Depth (nm)', 'Thickness (nm)', 'Std (nm)', 'Confidence', 'N']
+        self._enhanced_columns = ['CI95 Low', 'CI95 High', 'Mode']
+        self._all_columns = self._base_columns + self._enhanced_columns
+
+        self.table.setColumnCount(len(self._all_columns))
+        self.table.setHorizontalHeaderLabels(self._all_columns)
 
         # Configure header
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        for i in range(1, len(self._all_columns)):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
 
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.itemClicked.connect(self._on_item_clicked)
 
         layout.addWidget(self.table)
+
+        # Initially show enhanced columns
+        self._on_enhanced_toggled(True)
 
         # Summary
         self.summary_label = QLabel("No measurements")
@@ -94,6 +106,7 @@ class MeasurementTableWidget(QWidget):
 
         self._results.append(result)
         measurements = result.get('measurements', {})
+        enhanced_mode = result.get('enhanced_analysis', False)
 
         for depth, m in measurements.items():
             depth_val = float(depth) if isinstance(depth, str) else depth
@@ -136,6 +149,26 @@ class MeasurementTableWidget(QWidget):
 
             # N (number of measurements)
             self.table.setItem(row, 5, self._create_number_item(m['num_measurements'], '{:.0f}'))
+
+            # Enhanced metrics: CI95
+            if 'ci_95_low' in m:
+                ci_low_item = self._create_number_item(m['ci_95_low'], '{:.2f}')
+                ci_low_item.setForeground(QColor('#17a2b8'))
+                self.table.setItem(row, 6, ci_low_item)
+            else:
+                self.table.setItem(row, 6, QTableWidgetItem('-'))
+
+            if 'ci_95_high' in m:
+                ci_high_item = self._create_number_item(m['ci_95_high'], '{:.2f}')
+                ci_high_item.setForeground(QColor('#17a2b8'))
+                self.table.setItem(row, 7, ci_high_item)
+            else:
+                self.table.setItem(row, 7, QTableWidgetItem('-'))
+
+            # Analysis mode
+            mode_item = QTableWidgetItem('Enhanced' if enhanced_mode else 'Standard')
+            mode_item.setForeground(QColor('#17a2b8') if enhanced_mode else QColor('#6c757d'))
+            self.table.setItem(row, 8, mode_item)
 
         self._update_summary()
 
@@ -231,5 +264,92 @@ class MeasurementTableWidget(QWidget):
                 'confidence': self.table.item(row, 4).data(Qt.ItemDataRole.UserRole + 1) if self.table.item(row, 4) else 0,
                 'n_measurements': self.table.item(row, 5).data(Qt.ItemDataRole.UserRole + 1) if self.table.item(row, 5) else 0,
             }
+
+            # Add enhanced metrics if available
+            ci_low_item = self.table.item(row, 6)
+            if ci_low_item and ci_low_item.text() != '-':
+                row_data['ci_95_low'] = ci_low_item.data(Qt.ItemDataRole.UserRole + 1)
+
+            ci_high_item = self.table.item(row, 7)
+            if ci_high_item and ci_high_item.text() != '-':
+                row_data['ci_95_high'] = ci_high_item.data(Qt.ItemDataRole.UserRole + 1)
+
+            mode_item = self.table.item(row, 8)
+            if mode_item:
+                row_data['analysis_mode'] = mode_item.text()
+
             data.append(row_data)
         return data
+
+    def _on_enhanced_toggled(self, checked: bool):
+        """Toggle enhanced column visibility"""
+        for i in range(6, len(self._all_columns)):
+            self.table.setColumnHidden(i, not checked)
+
+    def _show_context_menu(self, position):
+        """Show context menu for table"""
+        menu = QMenu(self)
+
+        # Export selected action
+        export_action = menu.addAction("Export Selected")
+        export_action.triggered.connect(self._export_selected)
+
+        # Copy to clipboard action
+        copy_action = menu.addAction("Copy to Clipboard")
+        copy_action.triggered.connect(self._copy_to_clipboard)
+
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def _export_selected(self):
+        """Export selected rows"""
+        selected_rows = set()
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        if not selected_rows:
+            return
+
+        # Collect data from selected rows
+        data = []
+        for row in sorted(selected_rows):
+            row_data = {}
+            for col in range(self.table.columnCount()):
+                if not self.table.isColumnHidden(col):
+                    item = self.table.item(row, col)
+                    if item:
+                        row_data[self._all_columns[col]] = item.text()
+            data.append(row_data)
+
+        # Signal that export is requested (parent can handle)
+        print(f"Export requested for {len(data)} rows")
+
+    def _copy_to_clipboard(self):
+        """Copy selected data to clipboard"""
+        from PyQt6.QtWidgets import QApplication
+
+        selected_rows = set()
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        if not selected_rows:
+            return
+
+        # Build tab-separated text
+        lines = []
+
+        # Header
+        headers = [self._all_columns[i] for i in range(len(self._all_columns))
+                   if not self.table.isColumnHidden(i)]
+        lines.append('\t'.join(headers))
+
+        # Data
+        for row in sorted(selected_rows):
+            row_data = []
+            for col in range(self.table.columnCount()):
+                if not self.table.isColumnHidden(col):
+                    item = self.table.item(row, col)
+                    row_data.append(item.text() if item else '')
+            lines.append('\t'.join(row_data))
+
+        clipboard = QApplication.clipboard()
+        clipboard.setText('\n'.join(lines))

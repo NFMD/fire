@@ -4,14 +4,14 @@ Main Inference Pipeline for HR-TEM Analysis
 Orchestrates the complete measurement workflow:
 1. Image loading with scale extraction
 2. Preprocessing and auto-leveling
-3. Multi-method CD measurement
+3. Multi-method CD measurement (standard + Gatan DM-style)
 4. Result aggregation and consensus
 5. Visualization and export
 """
 import gc
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Literal
 import numpy as np
 from loguru import logger
 
@@ -27,6 +27,8 @@ from core.thickness_measurer import (
     MeasurementResult
 )
 from core.result_exporter import ResultExporter, ResultVisualizer
+from core.enhanced_measurer import EnhancedCDMeasurer, EnhancedMeasurementResult, HybridMeasurer
+from core.advanced_analysis import FFTAnalyzer, StatisticalAnalyzer
 from pipeline.batch_processor import BatchProcessor, WorkingGroup, ImageResult
 
 
@@ -67,6 +69,31 @@ class PipelineConfig:
     save_json: bool = True
     save_csv: bool = True
 
+    # === Advanced Analysis (Gatan DM Style) ===
+    use_enhanced_analysis: bool = True  # Use Gatan DM-style features
+
+    # Line profile methods
+    profile_methods: List[str] = field(
+        default_factory=lambda: ['fwhm', '10-90', 'derivative']
+    )
+
+    # Background subtraction
+    background_method: str = 'rolling_ball'  # 'none', 'rolling_ball', 'polynomial', 'tophat', 'gaussian'
+
+    # FFT calibration
+    fft_calibration: bool = False
+    lattice_spacing_nm: Optional[float] = None  # Known lattice for calibration
+
+    # Drift correction
+    drift_correction: bool = True
+
+    # Sub-pixel interpolation
+    interpolation_factor: int = 10
+
+    # Statistical analysis
+    outlier_method: str = 'iqr'  # 'iqr', 'mad', 'zscore', 'grubbs'
+    bootstrap_ci: bool = True
+
 
 class InferencePipeline:
     """
@@ -74,6 +101,10 @@ class InferencePipeline:
 
     Provides both single-image and batch processing capabilities
     with memory-efficient parallel execution.
+
+    Supports two analysis modes:
+    - Standard: Multi-variant preprocessing + edge detection
+    - Enhanced (Gatan DM-style): Line profile analysis, FFT, drift correction
     """
 
     def __init__(self, config: PipelineConfig = None, output_dir: str = None):
@@ -90,6 +121,8 @@ class InferencePipeline:
         self.loader = TIFFLoader()
         self.preprocessor = ImagePreprocessor()
         self.baseline_detector = BaselineDetector()
+
+        # Standard measurer
         self.thickness_measurer = ThicknessMeasurer(
             edge_methods=self.config.edge_methods,
             consensus_method=self.config.consensus_method,
@@ -97,6 +130,19 @@ class InferencePipeline:
             min_confidence=self.config.min_confidence
         )
         self.multi_measurer = MultiVariantMeasurer(self.thickness_measurer)
+
+        # Enhanced measurer (Gatan DM-style)
+        self.enhanced_measurer = EnhancedCDMeasurer(
+            interpolation_factor=self.config.interpolation_factor,
+            background_method=self.config.background_method,
+            use_drift_correction=self.config.drift_correction,
+            calibrate_with_fft=self.config.fft_calibration,
+            known_lattice_spacing_nm=self.config.lattice_spacing_nm
+        )
+
+        # FFT analyzer for additional analysis
+        self.fft_analyzer = FFTAnalyzer()
+
         self.visualizer = ResultVisualizer()
 
         # Output handling
@@ -122,7 +168,8 @@ class InferencePipeline:
             image_path: str,
             baseline_hint_y: Optional[int] = None,
             depths_nm: List[float] = None,
-            save_result: bool = True
+            save_result: bool = True,
+            use_enhanced: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Process a single HR-TEM image.
@@ -132,14 +179,17 @@ class InferencePipeline:
             baseline_hint_y: Optional hint for baseline position
             depths_nm: Measurement depths (uses config default if None)
             save_result: Whether to save visualization
+            use_enhanced: Use enhanced Gatan DM-style analysis (None = use config)
 
         Returns:
             Dictionary with all results
         """
         depths = depths_nm or self.config.depths_nm
+        enhanced = use_enhanced if use_enhanced is not None else self.config.use_enhanced_analysis
 
         logger.info(f"Processing: {Path(image_path).name}")
         logger.info(f"Measurement depths: {depths} nm")
+        logger.info(f"Analysis mode: {'Enhanced (Gatan DM-style)' if enhanced else 'Standard'}")
 
         # 1. Load image
         image, scale_info = self.loader.load(image_path)
@@ -161,41 +211,86 @@ class InferencePipeline:
             f"(confidence: {baseline_info.confidence:.2f})"
         )
 
-        # 4. Generate preprocessing variants
-        total_variants = (
-                len(self.config.preprocessing_methods) *
-                len(self.config.rotation_angles)
-        )
-        logger.info(f"Generating {total_variants} image variants for analysis")
+        # 4. FFT analysis (if enabled)
+        fft_result = None
+        calibrated_scale = scale_info.scale_nm_per_pixel
+        if enhanced and self.config.fft_calibration:
+            fft_result = self.fft_analyzer.analyze(
+                leveled_image, scale_info.scale_nm_per_pixel
+            )
+            if fft_result.confidence > 0.5:
+                logger.info(f"FFT detected periodicity: {fft_result.periodicity_nm:.2f} nm")
 
-        variants = self.preprocessor.generate_variants(
-            leveled_image,
-            methods=self.config.preprocessing_methods,
-            rotation_angles=self.config.rotation_angles,
-            scale_factors=[1.0]
-        )
+            # Calibrate scale if lattice spacing is known
+            if self.config.lattice_spacing_nm:
+                calibrated_scale = self.enhanced_measurer.calibrate_scale(
+                    leveled_image, scale_info.scale_nm_per_pixel
+                )
+                if calibrated_scale != scale_info.scale_nm_per_pixel:
+                    logger.info(f"Scale calibrated: {calibrated_scale:.4f} nm/pixel")
 
-        # 5. Multi-method measurement
-        measurements = self.multi_measurer.measure_all_variants(
-            image_variants=variants,
-            baseline_y=baseline_info.y_position,
-            depths_nm=depths,
-            scale_nm_per_pixel=scale_info.scale_nm_per_pixel,
-            num_lines=self.config.num_lines_per_depth,
-            line_spacing=self.config.line_spacing
-        )
+        # 5. Measurement (enhanced or standard)
+        enhanced_metrics = {}
+
+        if enhanced:
+            # Use enhanced Gatan DM-style analysis
+            logger.info("Running enhanced line profile analysis...")
+            measurements = self.enhanced_measurer.measure_all_depths(
+                image=leveled_image,
+                baseline_y=baseline_info.y_position,
+                depths_nm=depths,
+                scale_nm_per_pixel=calibrated_scale,
+                preprocess=True
+            )
+
+            # Extract enhanced metrics
+            for depth, m in measurements.items():
+                if hasattr(m, 'fwhm_nm') and m.fwhm_nm:
+                    enhanced_metrics[f'fwhm_{depth}nm'] = m.fwhm_nm
+                if hasattr(m, 'confidence_interval_95'):
+                    enhanced_metrics[f'ci95_{depth}nm'] = m.confidence_interval_95
+                if hasattr(m, 'method_results'):
+                    enhanced_metrics[f'methods_{depth}nm'] = m.method_results
+
+        else:
+            # Use standard multi-variant analysis
+            total_variants = (
+                    len(self.config.preprocessing_methods) *
+                    len(self.config.rotation_angles)
+            )
+            logger.info(f"Generating {total_variants} image variants for analysis")
+
+            variants = self.preprocessor.generate_variants(
+                leveled_image,
+                methods=self.config.preprocessing_methods,
+                rotation_angles=self.config.rotation_angles,
+                scale_factors=[1.0]
+            )
+
+            measurements = self.multi_measurer.measure_all_variants(
+                image_variants=variants,
+                baseline_y=baseline_info.y_position,
+                depths_nm=depths,
+                scale_nm_per_pixel=calibrated_scale,
+                num_lines=self.config.num_lines_per_depth,
+                line_spacing=self.config.line_spacing
+            )
 
         # 6. Log results
-        logger.info("=" * 50)
+        logger.info("=" * 60)
         logger.info("MEASUREMENT RESULTS")
-        logger.info("=" * 50)
-        for depth, result in sorted(measurements.items()):
+        logger.info("=" * 60)
+        for depth, m in sorted(measurements.items()):
+            ci_str = ""
+            if hasattr(m, 'confidence_interval_95') and m.confidence_interval_95[0] != m.confidence_interval_95[1]:
+                ci_str = f" CI95:[{m.confidence_interval_95[0]:.2f}-{m.confidence_interval_95[1]:.2f}]"
+
             logger.info(
                 f"  Depth {depth:5.1f} nm: "
-                f"{result.thickness_nm:7.2f} ± {result.thickness_std:5.2f} nm "
-                f"(n={result.num_measurements}, conf={result.confidence:.2f})"
+                f"{m.thickness_nm:7.2f} ± {m.thickness_std:5.2f} nm "
+                f"(n={m.num_measurements}, conf={m.confidence:.2f}){ci_str}"
             )
-        logger.info("=" * 50)
+        logger.info("=" * 60)
 
         # 7. Save results if requested
         jpeg_path = None
@@ -215,6 +310,7 @@ class InferencePipeline:
             'source_path': image_path,
             'success': True,
             'scale_info': scale_info.to_dict(),
+            'calibrated_scale': calibrated_scale,
             'baseline': {
                 'y_position': baseline_info.y_position,
                 'confidence': baseline_info.confidence,
@@ -228,13 +324,28 @@ class InferencePipeline:
                 'jpeg_path': jpeg_path,
                 'json_path': json_path
             },
+            'analysis_mode': 'enhanced' if enhanced else 'standard',
             'statistics': {
-                'total_variants': total_variants,
                 'preprocessing_methods': self.config.preprocessing_methods,
                 'rotation_angles': self.config.rotation_angles,
-                'edge_methods': self.config.edge_methods
+                'edge_methods': self.config.edge_methods,
+                'profile_methods': self.config.profile_methods if enhanced else [],
+                'background_method': self.config.background_method if enhanced else 'none',
             }
         }
+
+        # Add enhanced metrics if available
+        if enhanced_metrics:
+            result['enhanced_metrics'] = enhanced_metrics
+
+        # Add FFT result if available
+        if fft_result:
+            result['fft_analysis'] = {
+                'periodicity_nm': fft_result.periodicity_nm,
+                'orientation_deg': fft_result.orientation_deg,
+                'lattice_spacing_nm': fft_result.lattice_spacing_nm,
+                'confidence': fft_result.confidence
+            }
 
         # Cleanup
         gc.collect()
@@ -389,7 +500,9 @@ def create_pipeline(
         output_dir: str,
         depths_nm: List[float] = None,
         max_workers: int = 4,
-        high_precision: bool = True
+        high_precision: bool = True,
+        use_enhanced: bool = True,
+        **advanced_settings
 ) -> InferencePipeline:
     """
     Factory function to create configured pipeline.
@@ -399,6 +512,16 @@ def create_pipeline(
         depths_nm: Measurement depths
         max_workers: Number of parallel workers
         high_precision: Use high precision mode (more variants)
+        use_enhanced: Use enhanced Gatan DM-style analysis
+        **advanced_settings: Additional settings for enhanced analysis:
+            - profile_methods: List of profile methods ['fwhm', '10-90', 'derivative', 'sigmoid']
+            - background_method: Background subtraction method
+            - fft_calibration: Enable FFT calibration
+            - lattice_spacing_nm: Known lattice spacing for calibration
+            - drift_correction: Enable drift correction
+            - interpolation_factor: Sub-pixel interpolation factor
+            - outlier_method: Outlier rejection method
+            - bootstrap_ci: Enable bootstrap confidence intervals
 
     Returns:
         Configured InferencePipeline
@@ -410,7 +533,17 @@ def create_pipeline(
             rotation_angles=[-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0],
             edge_methods=['sobel', 'canny', 'gradient', 'morphological', 'scharr', 'laplacian'],
             num_lines_per_depth=7,
-            max_workers=max_workers
+            max_workers=max_workers,
+            # Enhanced settings
+            use_enhanced_analysis=use_enhanced,
+            profile_methods=advanced_settings.get('profile_methods', ['fwhm', '10-90', 'derivative']),
+            background_method=advanced_settings.get('background_method', 'rolling_ball'),
+            fft_calibration=advanced_settings.get('fft_calibration', False),
+            lattice_spacing_nm=advanced_settings.get('lattice_spacing_nm'),
+            drift_correction=advanced_settings.get('drift_correction', True),
+            interpolation_factor=advanced_settings.get('interpolation_factor', 10),
+            outlier_method=advanced_settings.get('outlier_method', 'iqr'),
+            bootstrap_ci=advanced_settings.get('bootstrap_ci', True),
         )
     else:
         config = PipelineConfig(
@@ -419,7 +552,16 @@ def create_pipeline(
             rotation_angles=[-1.0, 0.0, 1.0],
             edge_methods=['sobel', 'canny', 'gradient'],
             num_lines_per_depth=5,
-            max_workers=max_workers
+            max_workers=max_workers,
+            # Enhanced settings (simplified for standard mode)
+            use_enhanced_analysis=use_enhanced,
+            profile_methods=advanced_settings.get('profile_methods', ['fwhm', 'derivative']),
+            background_method=advanced_settings.get('background_method', 'none'),
+            fft_calibration=False,
+            drift_correction=advanced_settings.get('drift_correction', False),
+            interpolation_factor=advanced_settings.get('interpolation_factor', 5),
+            outlier_method=advanced_settings.get('outlier_method', 'iqr'),
+            bootstrap_ci=advanced_settings.get('bootstrap_ci', False),
         )
 
     return InferencePipeline(config=config, output_dir=output_dir)

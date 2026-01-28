@@ -6,6 +6,7 @@ from .file_list import FileListWidget
 from .settings_panel import SettingsPanel
 from .results_panel import ResultsPanel
 from .measurement_table import MeasurementTableWidget
+from .fft_viewer import FFTViewerWidget
 
 __all__ = [
     'ImageViewerWidget',
@@ -13,4 +14,5 @@ __all__ = [
     'SettingsPanel',
     'ResultsPanel',
     'MeasurementTableWidget',
+    'FFTViewerWidget',
 ]
