@@ -54,12 +54,15 @@ gui = [
 wavelet = [
     "PyWavelets>=1.4.0",
 ]
+deeplearning = [
+    "torch>=2.0.0",
+]
 full = [
-    "hrtem-analyzer[gui,wavelet]",
+    "hrtem-analyzer[gui,wavelet,deeplearning]",
     "scikit-image>=0.21.0",
 ]
 all = [
-    "hrtem-analyzer[gui,wavelet,dev]",
+    "hrtem-analyzer[gui,wavelet,deeplearning,dev]",
     "scikit-image>=0.21.0",
 ]
 

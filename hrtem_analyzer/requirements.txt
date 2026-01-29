@@ -23,3 +23,8 @@ PyQt6>=6.5.0
 # === Advanced Analysis (Optional but Recommended) ===
 PyWavelets>=1.4.0
 scikit-image>=0.21.0
+
+# === Deep Learning (CPU-optimized) ===
+# For CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# For CUDA: pip install torch (auto-detects CUDA)
+torch>=2.0.0

@@ -20,7 +20,8 @@ from .widgets import (
     SettingsPanel,
     ResultsPanel,
     MeasurementTableWidget,
-    FFTViewerWidget
+    FFTViewerWidget,
+    TrainingPanel
 )
 
 
@@ -189,6 +190,10 @@ class MainWindow(QMainWindow):
         self.results_panel = ResultsPanel()
         self.view_tabs.addTab(self.results_panel, "Results")
 
+        # Deep Learning Training tab
+        self.training_panel = TrainingPanel()
+        self.view_tabs.addTab(self.training_panel, "DL Training")
+
         center_layout.addWidget(self.view_tabs)
 
         # Right panel: Measurements table
@@ -266,6 +271,13 @@ class MainWindow(QMainWindow):
         stop_action.setShortcut("Escape")
         stop_action.triggered.connect(self._on_stop_analysis)
         analysis_menu.addAction(stop_action)
+
+        analysis_menu.addSeparator()
+
+        add_to_training_action = QAction("Add Results to &Training Data", self)
+        add_to_training_action.setShortcut("Ctrl+T")
+        add_to_training_action.triggered.connect(self._on_add_to_training)
+        analysis_menu.addAction(add_to_training_action)
 
         # View menu
         view_menu = menubar.addMenu("&View")
@@ -610,22 +622,132 @@ class MainWindow(QMainWindow):
 
                     writer.writerow(row)
 
+    def _on_add_to_training(self):
+        """Add current results to training data"""
+        if not self.results:
+            QMessageBox.warning(self, "No Results", "No analysis results to add to training data.")
+            return
+
+        # Check if deep learning module is available
+        try:
+            from ..deep_learning import PYTORCH_AVAILABLE
+            if not PYTORCH_AVAILABLE:
+                QMessageBox.warning(
+                    self,
+                    "PyTorch Not Available",
+                    "PyTorch is not installed. Install with:\npip install torch"
+                )
+                return
+        except ImportError:
+            QMessageBox.warning(self, "Module Error", "Deep learning module not found.")
+            return
+
+        # Get training data directory from training panel
+        data_dir = self.training_panel.training_data_widget.data_dir_edit.text()
+        if not data_dir:
+            QMessageBox.information(
+                self,
+                "Set Training Directory",
+                "Please set a training data directory in the DL Training tab first."
+            )
+            self.view_tabs.setCurrentWidget(self.training_panel)
+            return
+
+        # Add results to training data
+        try:
+            from ..deep_learning import TrainingDataManager, ImageAnnotation, CDAnnotation
+
+            manager = TrainingDataManager(data_dir)
+            added_count = 0
+
+            for result in self.results:
+                if not result.get('success'):
+                    continue
+
+                image_path = result['source_path']
+                scale = result.get('scale_info', {}).get('scale_nm_per_pixel', 1.0)
+                baseline_y = result.get('baseline', {}).get('y_position', 0)
+
+                # Create measurements list
+                measurements = []
+                for depth_str, data in result.get('measurements', {}).items():
+                    depth = float(depth_str)
+                    thickness = data.get('thickness_nm', 0)
+                    left_x = data.get('left_edge', 0)
+                    right_x = data.get('right_edge', 0)
+
+                    if thickness > 0:
+                        measurements.append(CDAnnotation(
+                            depth_nm=depth,
+                            thickness_nm=thickness,
+                            left_edge_x=int(left_x),
+                            right_edge_x=int(right_x),
+                            y_position=baseline_y + int(depth / scale),
+                            confidence=data.get('confidence', 1.0),
+                            annotator="auto"
+                        ))
+
+                if measurements:
+                    # Copy image to training directory
+                    new_image_path = manager.add_image(image_path, copy=True)
+
+                    # Create annotation
+                    annotation = ImageAnnotation(
+                        image_path=new_image_path,
+                        scale_nm_per_pixel=scale,
+                        baseline_y=baseline_y,
+                        measurements=measurements
+                    )
+
+                    manager.add_annotation(annotation)
+                    added_count += 1
+
+            if added_count > 0:
+                QMessageBox.information(
+                    self,
+                    "Training Data Added",
+                    f"Successfully added {added_count} images to training data.\n"
+                    f"Directory: {data_dir}"
+                )
+                # Refresh training panel statistics
+                self.training_panel.training_data_widget._update_statistics()
+            else:
+                QMessageBox.warning(
+                    self,
+                    "No Data Added",
+                    "No valid measurement results found to add."
+                )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add training data:\n{str(e)}")
+
     def _on_about(self):
         """Show about dialog"""
+        # Check deep learning availability
+        try:
+            from ..deep_learning import PYTORCH_AVAILABLE, PYTORCH_VERSION
+            dl_status = f"PyTorch {PYTORCH_VERSION}" if PYTORCH_AVAILABLE else "Not installed"
+        except ImportError:
+            dl_status = "Not available"
+
         QMessageBox.about(
             self,
             "About HR-TEM Analyzer",
-            """<h2>HR-TEM Analyzer</h2>
-            <p>Version 0.1.0</p>
+            f"""<h2>HR-TEM Analyzer</h2>
+            <p>Version 1.0.0</p>
             <p>Automated Critical Dimension (CD) measurement system
             for High-Resolution Transmission Electron Microscopy images.</p>
             <p><b>Features:</b></p>
             <ul>
-                <li>Multi-method edge detection</li>
-                <li>Automatic scale extraction</li>
+                <li>Multi-method edge detection with consensus</li>
+                <li>Automatic scale extraction from TIFF metadata</li>
+                <li>FFT-based calibration and analysis</li>
+                <li>Sub-pixel precision measurement (ESF/LSF)</li>
+                <li>Monte Carlo uncertainty estimation</li>
+                <li>Deep learning CD measurement (CPU/GPU)</li>
                 <li>Parallel batch processing</li>
-                <li>Consensus-based measurements</li>
             </ul>
+            <p><b>Deep Learning:</b> {dl_status}</p>
             """
         )
 
