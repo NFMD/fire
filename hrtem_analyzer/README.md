@@ -130,6 +130,37 @@ python scripts/build_executable.py --clean
 
 The executable will be in the `dist/` folder.
 
+## Building Installer (.exe Setup)
+
+For a professional installer that users can run to install the application:
+
+### Windows Installer (.exe Setup)
+
+```bash
+# 1. Install Inno Setup from https://jrsoftware.org/isinfo.php
+# 2. Build the installer
+python scripts/build_installer.py
+```
+
+This creates `installer_output/HRTEM-Analyzer-Setup-1.0.0.exe`
+
+### macOS Installer (.dmg)
+
+```bash
+python scripts/build_installer.py
+```
+
+Creates `installer_output/HRTEM-Analyzer-1.0.0-macOS.dmg`
+
+### Linux Packages (.deb, .rpm)
+
+```bash
+# Install fpm first: gem install fpm
+python scripts/build_installer.py
+```
+
+Creates `.deb` and `.rpm` packages in `installer_output/`
+
 ## Quick Start
 
 ### Graphical User Interface (GUI)
