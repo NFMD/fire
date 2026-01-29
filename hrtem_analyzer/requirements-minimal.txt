@@ -1,0 +1,12 @@
+# HR-TEM Analyzer - Minimal Requirements
+# =======================================
+# For basic CLI usage without GUI
+# Install: pip install -r requirements-minimal.txt
+
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+tifffile>=2023.8.0
+scipy>=1.11.0
+loguru>=0.7.0
+joblib>=1.3.0

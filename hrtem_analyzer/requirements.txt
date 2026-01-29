@@ -1,0 +1,25 @@
+# HR-TEM Analyzer Requirements
+# ============================
+# Install: pip install -r requirements.txt
+# For minimal install: pip install -r requirements-minimal.txt
+
+# === Core Dependencies (Required) ===
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+tifffile>=2023.8.0
+scipy>=1.11.0
+pyyaml>=6.0
+tqdm>=4.65.0
+loguru>=0.7.0
+
+# === Parallel Processing ===
+joblib>=1.3.0
+psutil>=5.9.0
+
+# === GUI (PyQt6) ===
+PyQt6>=6.5.0
+
+# === Advanced Analysis (Optional but Recommended) ===
+PyWavelets>=1.4.0
+scikit-image>=0.21.0
