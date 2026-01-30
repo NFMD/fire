@@ -8,6 +8,7 @@ from .results_panel import ResultsPanel
 from .measurement_table import MeasurementTableWidget
 from .fft_viewer import FFTViewerWidget
 from .training_panel import TrainingPanel
+from .manual_measurement import ManualMeasurementWidget, AutoLeveler, Measurement
 
 __all__ = [
     'ImageViewerWidget',
@@ -17,4 +18,7 @@ __all__ = [
     'MeasurementTableWidget',
     'FFTViewerWidget',
     'TrainingPanel',
+    'ManualMeasurementWidget',
+    'AutoLeveler',
+    'Measurement',
 ]

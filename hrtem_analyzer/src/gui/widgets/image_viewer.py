@@ -1,23 +1,26 @@
 """
-Image Viewer Widget with Baseline Selection
+Image Viewer Widget with Baseline Selection and Manual Measurement
 
 Provides interactive image viewing with:
 - Zoom and pan
 - Baseline (0-point) selection via click
+- Manual measurement drawing
 - Measurement overlay
 - Scale bar display
+- Auto-leveling support
 """
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import numpy as np
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QPushButton, QSlider,
     QCheckBox, QGraphicsView, QGraphicsScene,
-    QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsTextItem
+    QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsTextItem,
+    QGraphicsEllipseItem
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QLineF
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor,
     QWheelEvent, QMouseEvent, QFont, QBrush
@@ -30,11 +33,23 @@ except ImportError:
 
 
 class ImageGraphicsView(QGraphicsView):
-    """Custom graphics view with zoom and pan support"""
+    """Custom graphics view with zoom, pan, and measurement support"""
 
     position_changed = pyqtSignal(int, int, float)  # x, y, pixel value
     clicked = pyqtSignal(int, int)  # x, y in image coordinates
     baseline_set = pyqtSignal(int)  # y position
+
+    # Measurement signals
+    measurement_started = pyqtSignal(QPointF)  # start point
+    measurement_ended = pyqtSignal(QPointF, QPointF)  # start, end
+    measurement_preview = pyqtSignal(QPointF, QPointF)  # current preview line
+
+    # Measurement modes
+    MODE_PAN = 'pan'
+    MODE_BASELINE = 'baseline'
+    MODE_MEASURE_HORIZONTAL = 'horizontal'
+    MODE_MEASURE_VERTICAL = 'vertical'
+    MODE_MEASURE_FREE = 'free'
 
     def __init__(self):
         super().__init__()
@@ -49,21 +64,40 @@ class ImageGraphicsView(QGraphicsView):
 
         self._zoom = 1.0
         self._image_data: Optional[np.ndarray] = None
-        self._setting_baseline = False
+        self._mode = self.MODE_PAN
+
+        # Measurement state
+        self._measuring = False
+        self._measure_start: Optional[QPointF] = None
+        self._preview_line: Optional[QGraphicsLineItem] = None
 
     def set_image_data(self, data: np.ndarray):
         """Store image data for pixel value queries"""
         self._image_data = data
 
-    def enable_baseline_mode(self, enabled: bool):
-        """Enable/disable baseline setting mode"""
-        self._setting_baseline = enabled
-        if enabled:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self.setCursor(Qt.CursorShape.CrossCursor)
-        else:
+    def set_mode(self, mode: str):
+        """Set interaction mode"""
+        self._mode = mode
+        self._measuring = False
+        self._measure_start = None
+
+        if self._preview_line:
+            self.scene().removeItem(self._preview_line)
+            self._preview_line = None
+
+        if mode == self.MODE_PAN:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def enable_baseline_mode(self, enabled: bool):
+        """Enable/disable baseline setting mode"""
+        if enabled:
+            self.set_mode(self.MODE_BASELINE)
+        else:
+            self.set_mode(self.MODE_PAN)
 
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zoom"""
@@ -81,24 +115,84 @@ class ImageGraphicsView(QGraphicsView):
 
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse press"""
-        if self._setting_baseline and event.button() == Qt.MouseButton.LeftButton:
-            pos = self.mapToScene(event.pos())
-            self.baseline_set.emit(int(pos.y()))
+        pos = self.mapToScene(event.pos())
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._mode == self.MODE_BASELINE:
+                self.baseline_set.emit(int(pos.y()))
+            elif self._mode in [self.MODE_MEASURE_HORIZONTAL,
+                               self.MODE_MEASURE_VERTICAL,
+                               self.MODE_MEASURE_FREE]:
+                # Start measurement
+                self._measuring = True
+                self._measure_start = pos
+                self.measurement_started.emit(pos)
+
+                # Create preview line
+                pen = QPen(QColor("#00ff00"))
+                pen.setWidth(2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                self._preview_line = self.scene().addLine(
+                    pos.x(), pos.y(), pos.x(), pos.y(), pen
+                )
+            else:
+                super().mousePressEvent(event)
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        """Handle mouse move for position tracking"""
+        """Handle mouse move"""
         pos = self.mapToScene(event.pos())
         x, y = int(pos.x()), int(pos.y())
 
+        # Update position info
         if self._image_data is not None:
             h, w = self._image_data.shape[:2]
             if 0 <= x < w and 0 <= y < h:
                 value = float(self._image_data[y, x])
                 self.position_changed.emit(x, y, value)
 
+        # Update measurement preview
+        if self._measuring and self._measure_start and self._preview_line:
+            start = self._measure_start
+            end = pos
+
+            # Constrain based on mode
+            if self._mode == self.MODE_MEASURE_HORIZONTAL:
+                end = QPointF(pos.x(), start.y())
+            elif self._mode == self.MODE_MEASURE_VERTICAL:
+                end = QPointF(start.x(), pos.y())
+
+            self._preview_line.setLine(QLineF(start, end))
+            self.measurement_preview.emit(start, end)
+
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """Handle mouse release"""
+        if event.button() == Qt.MouseButton.LeftButton and self._measuring:
+            pos = self.mapToScene(event.pos())
+            start = self._measure_start
+            end = pos
+
+            # Constrain based on mode
+            if self._mode == self.MODE_MEASURE_HORIZONTAL:
+                end = QPointF(pos.x(), start.y())
+            elif self._mode == self.MODE_MEASURE_VERTICAL:
+                end = QPointF(start.x(), pos.y())
+
+            # Remove preview
+            if self._preview_line:
+                self.scene().removeItem(self._preview_line)
+                self._preview_line = None
+
+            # Emit measurement
+            self.measurement_ended.emit(start, end)
+
+            self._measuring = False
+            self._measure_start = None
+        else:
+            super().mouseReleaseEvent(event)
 
     def zoom_in(self):
         """Zoom in"""
@@ -125,27 +219,35 @@ class ImageGraphicsView(QGraphicsView):
 
 class ImageViewerWidget(QWidget):
     """
-    Image viewer widget with baseline selection capability.
+    Image viewer widget with baseline selection and manual measurement.
 
     Features:
     - Load and display TIFF images
     - Zoom and pan
     - Click to set baseline (0-point)
+    - Interactive manual CD measurement
     - Show measurement overlays
     - Display scale information
+    - Auto-leveling support
     """
 
     baseline_changed = pyqtSignal(int)  # y position
     position_changed = pyqtSignal(int, int, float)  # x, y, value
+    measurement_completed = pyqtSignal(QPointF, QPointF, str)  # start, end, mode
+    image_rotated = pyqtSignal(float)  # rotation angle applied
 
     def __init__(self):
         super().__init__()
         self._image_path: Optional[str] = None
         self._image_data: Optional[np.ndarray] = None
+        self._display_data: Optional[np.ndarray] = None
         self._scale_nm_per_pixel: float = 1.0
         self._baseline_y: Optional[int] = None
         self._baseline_line: Optional[QGraphicsLineItem] = None
-        self._measurement_items = []
+        self._baseline_text: Optional[QGraphicsTextItem] = None
+        self._measurement_items: List = []
+        self._manual_measurement_items: List = []
+        self._current_rotation: float = 0.0
 
         self._setup_ui()
 
@@ -205,6 +307,7 @@ class ImageViewerWidget(QWidget):
         self.view.setScene(self.scene)
         self.view.position_changed.connect(self._on_position_changed)
         self.view.baseline_set.connect(self._on_baseline_set)
+        self.view.measurement_ended.connect(self._on_measurement_ended)
 
         layout.addWidget(self.view)
 
@@ -454,3 +557,204 @@ class ImageViewerWidget(QWidget):
         for item in self._measurement_items:
             self.scene.removeItem(item)
         self._measurement_items = []
+
+    def set_measurement_mode(self, mode: str):
+        """
+        Set measurement mode.
+
+        Args:
+            mode: 'none', 'baseline', 'horizontal', 'vertical', 'free'
+        """
+        mode_map = {
+            'none': ImageGraphicsView.MODE_PAN,
+            'baseline': ImageGraphicsView.MODE_BASELINE,
+            'horizontal': ImageGraphicsView.MODE_MEASURE_HORIZONTAL,
+            'vertical': ImageGraphicsView.MODE_MEASURE_VERTICAL,
+            'free': ImageGraphicsView.MODE_MEASURE_FREE,
+        }
+        self.view.set_mode(mode_map.get(mode, ImageGraphicsView.MODE_PAN))
+
+    def _on_measurement_ended(self, start: QPointF, end: QPointF):
+        """Handle completed measurement"""
+        # Determine mode from current view mode
+        mode_map = {
+            ImageGraphicsView.MODE_MEASURE_HORIZONTAL: 'horizontal',
+            ImageGraphicsView.MODE_MEASURE_VERTICAL: 'vertical',
+            ImageGraphicsView.MODE_MEASURE_FREE: 'free',
+        }
+        mode = mode_map.get(self.view._mode, 'free')
+
+        # Draw the measurement
+        self._draw_manual_measurement(start, end, mode)
+
+        # Emit signal
+        self.measurement_completed.emit(start, end, mode)
+
+    def _draw_manual_measurement(self, start: QPointF, end: QPointF,
+                                  mode: str, color: str = "#00ff00"):
+        """Draw a manual measurement line"""
+        qcolor = QColor(color)
+        pen = QPen(qcolor)
+        pen.setWidth(2)
+
+        # Main line
+        line = self.scene.addLine(start.x(), start.y(), end.x(), end.y(), pen)
+        self._manual_measurement_items.append(line)
+
+        # End markers
+        marker_size = 6
+        for point in [start, end]:
+            marker = self.scene.addEllipse(
+                point.x() - marker_size/2,
+                point.y() - marker_size/2,
+                marker_size, marker_size,
+                pen, QBrush(qcolor)
+            )
+            self._manual_measurement_items.append(marker)
+
+        # Calculate and display distance
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+
+        if mode == 'horizontal':
+            distance_px = abs(dx)
+        elif mode == 'vertical':
+            distance_px = abs(dy)
+        else:
+            distance_px = np.sqrt(dx**2 + dy**2)
+
+        distance_nm = distance_px * self._scale_nm_per_pixel
+
+        # Label
+        mid_x = (start.x() + end.x()) / 2
+        mid_y = (start.y() + end.y()) / 2
+
+        text = self.scene.addText(f"{distance_nm:.2f} nm", QFont("Arial", 9))
+        text.setDefaultTextColor(qcolor)
+        text.setPos(mid_x + 5, mid_y - 15)
+        self._manual_measurement_items.append(text)
+
+    def add_manual_measurement(self, start_x: float, start_y: float,
+                               end_x: float, end_y: float,
+                               label: str = "", color: str = "#00ff00"):
+        """Add a manual measurement visualization"""
+        start = QPointF(start_x, start_y)
+        end = QPointF(end_x, end_y)
+        self._draw_manual_measurement(start, end, 'free', color)
+
+    def clear_manual_measurements(self):
+        """Clear all manual measurement overlays"""
+        for item in self._manual_measurement_items:
+            self.scene.removeItem(item)
+        self._manual_measurement_items = []
+
+    def rotate_image(self, angle: float):
+        """
+        Rotate the displayed image.
+
+        Args:
+            angle: Rotation angle in degrees (positive = counter-clockwise)
+        """
+        if self._image_data is None:
+            return
+
+        import cv2
+
+        self._current_rotation = angle
+
+        # Rotate original image
+        h, w = self._image_data.shape[:2]
+        center = (w // 2, h // 2)
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # Rotate
+        if len(self._image_data.shape) == 2:
+            rotated = cv2.warpAffine(
+                self._image_data, matrix, (w, h),
+                borderMode=cv2.BORDER_REFLECT
+            )
+        else:
+            rotated = cv2.warpAffine(
+                self._image_data, matrix, (w, h),
+                borderMode=cv2.BORDER_REFLECT
+            )
+
+        # Update display
+        self._update_display(rotated)
+        self.image_rotated.emit(angle)
+
+    def _update_display(self, data: np.ndarray):
+        """Update the displayed image"""
+        self._display_data = data
+
+        # Convert to display format
+        if len(data.shape) == 3:
+            display_data = data[:, :, :3] if data.shape[2] >= 3 else data[:, :, 0]
+        else:
+            display_data = data
+
+        # Normalize to 0-255
+        if display_data.dtype != np.uint8:
+            dmin, dmax = display_data.min(), display_data.max()
+            if dmax > dmin:
+                display_data = ((display_data - dmin) / (dmax - dmin) * 255).astype(np.uint8)
+            else:
+                display_data = np.zeros_like(display_data, dtype=np.uint8)
+
+        # Create QImage
+        h, w = display_data.shape[:2]
+        if len(display_data.shape) == 2:
+            qimage = QImage(
+                display_data.data, w, h, w,
+                QImage.Format.Format_Grayscale8
+            )
+        else:
+            bytes_per_line = 3 * w
+            qimage = QImage(
+                display_data.data, w, h, bytes_per_line,
+                QImage.Format.Format_RGB888
+            )
+
+        # Update scene
+        # Find and update pixmap item
+        for item in self.scene.items():
+            if isinstance(item, QGraphicsPixmapItem):
+                item.setPixmap(QPixmap.fromImage(qimage))
+                break
+        else:
+            # No pixmap found, add new one
+            self.scene.clear()
+            self._baseline_line = None
+            self._baseline_text = None
+            self._measurement_items = []
+            self._manual_measurement_items = []
+
+            pixmap = QPixmap.fromImage(qimage)
+            self.scene.addPixmap(pixmap)
+            self.scene.setSceneRect(QRectF(pixmap.rect()))
+
+        # Redraw baseline if set
+        if self._baseline_y is not None:
+            self._draw_baseline(self._baseline_y)
+
+    def get_scale_nm_per_pixel(self) -> float:
+        """Get current scale in nm/pixel"""
+        return self._scale_nm_per_pixel
+
+    def set_scale_nm_per_pixel(self, scale: float):
+        """Set scale in nm/pixel"""
+        self._scale_nm_per_pixel = scale
+        if self._image_path:
+            self.info_label.setText(
+                f"{Path(self._image_path).name} | "
+                f"{self._image_data.shape[1]}x{self._image_data.shape[0]} | "
+                f"{scale:.4f} nm/px"
+            )
+
+    def get_image_data(self) -> Optional[np.ndarray]:
+        """Get current image data"""
+        return self._display_data if self._display_data is not None else self._image_data
+
+    def get_current_rotation(self) -> float:
+        """Get current rotation angle"""
+        return self._current_rotation

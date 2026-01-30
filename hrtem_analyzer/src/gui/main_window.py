@@ -21,7 +21,9 @@ from .widgets import (
     ResultsPanel,
     MeasurementTableWidget,
     FFTViewerWidget,
-    TrainingPanel
+    TrainingPanel,
+    ManualMeasurementWidget,
+    AutoLeveler
 )
 from ..core.result_exporter import NumpyEncoder, convert_numpy_types
 
@@ -179,9 +181,25 @@ class MainWindow(QMainWindow):
 
         self.view_tabs = QTabWidget()
 
-        # Image viewer tab
+        # Image viewer tab with manual measurement panel
+        image_tab = QWidget()
+        image_tab_layout = QHBoxLayout(image_tab)
+        image_tab_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Image viewer
         self.image_viewer = ImageViewerWidget()
-        self.view_tabs.addTab(self.image_viewer, "Image View")
+        image_tab_layout.addWidget(self.image_viewer, stretch=3)
+
+        # Manual measurement panel (collapsible right side)
+        self.manual_measurement = ManualMeasurementWidget()
+        self.manual_measurement.setMaximumWidth(320)
+        self.manual_measurement.setMinimumWidth(280)
+        image_tab_layout.addWidget(self.manual_measurement, stretch=1)
+
+        # Auto-leveler instance
+        self.auto_leveler = AutoLeveler()
+
+        self.view_tabs.addTab(image_tab, "Image View")
 
         # FFT Analysis tab
         self.fft_viewer = FFTViewerWidget()
@@ -381,6 +399,13 @@ class MainWindow(QMainWindow):
         # Image viewer signals
         self.image_viewer.baseline_changed.connect(self._on_baseline_changed)
         self.image_viewer.position_changed.connect(self._on_position_changed)
+        self.image_viewer.measurement_completed.connect(self._on_manual_measurement)
+
+        # Manual measurement widget signals
+        self.manual_measurement.tool_changed.connect(self._on_measurement_tool_changed)
+        self.manual_measurement.baseline_set.connect(self._on_manual_baseline_set)
+        self.manual_measurement.auto_level_requested.connect(self._on_auto_level_requested)
+        self.manual_measurement.clear_measurements.connect(self._on_clear_manual_measurements)
 
         # FFT viewer signals
         self.fft_viewer.calibration_requested.connect(self._on_fft_calibration)
@@ -390,6 +415,84 @@ class MainWindow(QMainWindow):
         self.settings_panel.lattice_spacing_spin.setValue(spacing_nm)
         self.settings_panel.fft_calibration_cb.setChecked(True)
         self.status_label.setText(f"FFT calibration set: {spacing_nm:.3f} nm")
+
+    def _on_measurement_tool_changed(self, tool: str):
+        """Handle measurement tool change"""
+        self.image_viewer.set_measurement_mode(tool)
+        tool_names = {
+            'none': 'Pan/Zoom',
+            'baseline': 'Set Baseline',
+            'horizontal': 'Horizontal CD',
+            'vertical': 'Depth',
+            'free': 'Free Measure',
+        }
+        self.status_label.setText(f"Tool: {tool_names.get(tool, tool)}")
+
+    def _on_manual_baseline_set(self, y: int, angle: float):
+        """Handle manual baseline setting"""
+        self.image_viewer.set_baseline(y)
+        self.settings_panel.baseline_spin.setValue(y)
+        if abs(angle) > 0.01:
+            self.image_viewer.rotate_image(-angle)
+            self.status_label.setText(f"Baseline set at y={y}, rotated {-angle:.2f}°")
+        else:
+            self.status_label.setText(f"Baseline set at y={y}")
+
+    def _on_auto_level_requested(self):
+        """Handle auto-level detection request"""
+        image_data = self.image_viewer.get_image_data()
+        if image_data is None:
+            QMessageBox.warning(self, "No Image", "Please load an image first.")
+            return
+
+        self.status_label.setText("Detecting image tilt...")
+        QApplication.processEvents()
+
+        # Run auto-leveling detection
+        angle, confidence, method = self.auto_leveler.detect_level(image_data)
+
+        # Update manual measurement widget
+        self.manual_measurement.set_detected_angle(angle)
+
+        self.status_label.setText(
+            f"Detected tilt: {angle:.2f}° (confidence: {confidence:.0%}, method: {method})"
+        )
+
+        if abs(angle) > 0.1:
+            # Ask if user wants to apply correction
+            reply = QMessageBox.question(
+                self, "Apply Level Correction?",
+                f"Detected tilt angle: {angle:.2f}°\n\n"
+                f"Method: {method}\n"
+                f"Confidence: {confidence:.0%}\n\n"
+                "Apply rotation correction?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.image_viewer.rotate_image(-angle)
+                self.status_label.setText(f"Applied rotation correction: {-angle:.2f}°")
+
+    def _on_manual_measurement(self, start, end, mode: str):
+        """Handle completed manual measurement"""
+        if not self.manual_measurement.session:
+            # Initialize session if needed
+            scale = self.image_viewer.get_scale_nm_per_pixel()
+            path = self.current_image_path or "unknown"
+            self.manual_measurement.set_session(path, scale)
+
+        # Add measurement to widget
+        measurement = self.manual_measurement.add_measurement(start, end, mode)
+
+        if measurement:
+            self.status_label.setText(
+                f"Measurement: {measurement.distance_nm:.2f} nm "
+                f"({measurement.distance_px:.1f} px)"
+            )
+
+    def _on_clear_manual_measurements(self):
+        """Clear all manual measurements from viewer"""
+        self.image_viewer.clear_manual_measurements()
 
     def _on_open_images(self):
         """Open image files dialog"""
@@ -443,8 +546,19 @@ class MainWindow(QMainWindow):
     def _load_image(self, path: str):
         """Load an image into the viewer"""
         self.current_image_path = path
-        self.image_viewer.load_image(path)
-        self.status_label.setText(f"Loaded: {Path(path).name}")
+        success = self.image_viewer.load_image(path)
+
+        if success:
+            # Initialize manual measurement session with scale from image
+            scale = self.image_viewer.get_scale_nm_per_pixel()
+            self.manual_measurement.set_session(path, scale)
+
+            # Clear previous measurements
+            self.image_viewer.clear_manual_measurements()
+
+            self.status_label.setText(f"Loaded: {Path(path).name}")
+        else:
+            self.status_label.setText(f"Failed to load: {Path(path).name}")
 
     def _on_baseline_changed(self, y: int):
         """Handle baseline position change"""
