@@ -354,40 +354,64 @@ class DataAugmentor:
 
 
 if TORCH_AVAILABLE:
-    class HRTEMDataset(Dataset):
+    class HRTEMPatchDataset(Dataset):
         """
-        PyTorch Dataset for HR-TEM images.
+        Patch-based PyTorch Dataset for HR-TEM images.
 
-        Loads images and annotations for training deep learning models.
+        Instead of resizing the entire image, extracts patches at original resolution
+        to preserve fine details critical for precise CD measurement.
+
+        Approach:
+        - Extract multiple patches from each image
+        - Focus patches on edge regions (where measurements exist)
+        - Include context patches for background learning
+        - During inference, use sliding window with overlap
         """
 
         def __init__(self, data_manager: TrainingDataManager,
                      split: str = 'train',
                      transform=None,
-                     target_size: Tuple[int, int] = (256, 256),
+                     patch_size: int = 256,
+                     patches_per_image: int = 20,
+                     edge_focus_ratio: float = 0.7,
+                     overlap_ratio: float = 0.5,
                      depths_nm: List[float] = None):
             """
             Args:
                 data_manager: TrainingDataManager instance
                 split: 'train' or 'val'
                 transform: Optional transforms
-                target_size: Target image size (H, W)
+                patch_size: Size of patches to extract (square)
+                patches_per_image: Number of patches to extract per image
+                edge_focus_ratio: Ratio of patches centered on edges vs random
+                overlap_ratio: Overlap between patches for sliding window
                 depths_nm: List of depth values to predict
             """
             self.data_manager = data_manager
             self.split = split
             self.transform = transform
-            self.target_size = target_size
+            self.patch_size = patch_size
+            self.patches_per_image = patches_per_image
+            self.edge_focus_ratio = edge_focus_ratio
+            self.overlap_ratio = overlap_ratio
             self.depths_nm = depths_nm or [5, 10, 15, 20, 25]
 
-            # Load data
-            self.samples = self._load_samples()
+            # Random generator for reproducibility
+            self.rng = np.random.default_rng(42 if split == 'train' else 43)
+
+            # Load image list and pre-compute patch locations
+            self.image_annotations = self._load_samples()
+            self.patch_index = self._build_patch_index()
 
         def _load_samples(self) -> List[Tuple[str, ImageAnnotation]]:
             """Load samples based on split"""
             all_samples = self.data_manager.list_annotated_images()
 
-            # Simple split based on index
+            # Shuffle with fixed seed for reproducibility
+            rng = np.random.default_rng(42)
+            indices = rng.permutation(len(all_samples))
+            all_samples = [all_samples[i] for i in indices]
+
             split_idx = int(len(all_samples) * 0.8)
 
             if self.split == 'train':
@@ -395,115 +419,418 @@ if TORCH_AVAILABLE:
             else:
                 return all_samples[split_idx:]
 
+        def _build_patch_index(self) -> List[Tuple[int, int, int, List]]:
+            """
+            Build index of all patches to extract.
+
+            Returns:
+                List of (image_idx, patch_x, patch_y, measurements_in_patch)
+            """
+            patch_index = []
+
+            for img_idx, (image_path, annotation) in enumerate(self.image_annotations):
+                # Get image dimensions
+                if PIL_AVAILABLE:
+                    with Image.open(image_path) as img:
+                        img_w, img_h = img.size
+                elif CV2_AVAILABLE:
+                    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                    img_h, img_w = img.shape
+                else:
+                    continue
+
+                # Collect edge positions for focused sampling
+                edge_positions = []
+                for m in annotation.measurements:
+                    # Left edge
+                    edge_positions.append((m.left_edge_x, m.y_position, m))
+                    # Right edge
+                    edge_positions.append((m.right_edge_x, m.y_position, m))
+
+                # Number of edge-focused patches
+                n_edge_patches = int(self.patches_per_image * self.edge_focus_ratio)
+                n_random_patches = self.patches_per_image - n_edge_patches
+
+                half_patch = self.patch_size // 2
+
+                # Extract edge-focused patches
+                if edge_positions:
+                    for _ in range(n_edge_patches):
+                        # Randomly select an edge
+                        ex, ey, _ = edge_positions[self.rng.integers(len(edge_positions))]
+
+                        # Add jitter to avoid always centering exactly on edge
+                        jitter_x = self.rng.integers(-half_patch//2, half_patch//2)
+                        jitter_y = self.rng.integers(-half_patch//2, half_patch//2)
+
+                        # Calculate patch top-left corner
+                        px = max(0, min(img_w - self.patch_size, ex - half_patch + jitter_x))
+                        py = max(0, min(img_h - self.patch_size, ey - half_patch + jitter_y))
+
+                        # Find measurements in this patch
+                        measurements = self._get_measurements_in_patch(
+                            annotation.measurements, px, py, self.patch_size
+                        )
+
+                        patch_index.append((img_idx, px, py, measurements))
+
+                # Extract random patches for background context
+                for _ in range(n_random_patches):
+                    px = self.rng.integers(0, max(1, img_w - self.patch_size))
+                    py = self.rng.integers(0, max(1, img_h - self.patch_size))
+
+                    measurements = self._get_measurements_in_patch(
+                        annotation.measurements, px, py, self.patch_size
+                    )
+
+                    patch_index.append((img_idx, px, py, measurements))
+
+            return patch_index
+
+        def _get_measurements_in_patch(self, measurements: List[CDAnnotation],
+                                       px: int, py: int, size: int) -> List[CDAnnotation]:
+            """Get measurements that fall within a patch"""
+            result = []
+            for m in measurements:
+                # Check if measurement y position is in patch
+                if py <= m.y_position < py + size:
+                    # Check if at least one edge is in patch
+                    if (px <= m.left_edge_x < px + size or
+                        px <= m.right_edge_x < px + size):
+                        # Create adjusted measurement relative to patch
+                        adjusted = CDAnnotation(
+                            depth_nm=m.depth_nm,
+                            thickness_nm=m.thickness_nm,
+                            left_edge_x=m.left_edge_x - px,
+                            right_edge_x=m.right_edge_x - px,
+                            y_position=m.y_position - py,
+                            confidence=m.confidence,
+                            annotator=m.annotator
+                        )
+                        result.append(adjusted)
+            return result
+
         def __len__(self) -> int:
-            return len(self.samples)
+            return len(self.patch_index)
 
         def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-            image_path, annotation = self.samples[idx]
+            img_idx, px, py, measurements = self.patch_index[idx]
+            image_path, annotation = self.image_annotations[img_idx]
 
-            # Load image
+            # Load full image
             if PIL_AVAILABLE:
-                image = np.array(Image.open(image_path).convert('L'))
+                full_image = np.array(Image.open(image_path).convert('L'))
             elif CV2_AVAILABLE:
-                image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                full_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             else:
                 raise RuntimeError("Neither PIL nor OpenCV available")
 
-            # Resize
-            if CV2_AVAILABLE:
-                image = cv2.resize(image, self.target_size[::-1])
-            elif PIL_AVAILABLE:
-                img_pil = Image.fromarray(image)
-                img_pil = img_pil.resize(self.target_size[::-1])
-                image = np.array(img_pil)
+            # Extract patch (no resize - original resolution!)
+            patch = full_image[py:py+self.patch_size, px:px+self.patch_size]
+
+            # Pad if necessary (edge cases)
+            if patch.shape[0] < self.patch_size or patch.shape[1] < self.patch_size:
+                padded = np.zeros((self.patch_size, self.patch_size), dtype=patch.dtype)
+                padded[:patch.shape[0], :patch.shape[1]] = patch
+                patch = padded
 
             # Normalize to [0, 1]
-            image = image.astype(np.float32) / 255.0
+            patch = patch.astype(np.float32) / 255.0
 
-            # Create edge map target (simplified)
-            edge_map = self._create_edge_map(annotation, self.target_size)
+            # Create edge map for this patch
+            edge_map = self._create_patch_edge_map(measurements)
 
-            # Create CD targets
-            cd_targets = self._create_cd_targets(annotation)
+            # Create CD regression targets for this patch
+            cd_targets, cd_mask = self._create_patch_cd_targets(measurements)
 
-            # Apply transforms
-            if self.transform:
-                image = self.transform(image)
+            # Apply transforms (augmentation)
+            if self.transform and self.split == 'train':
+                patch, edge_map = self.transform(patch, edge_map)
 
             # Convert to tensors
-            image_tensor = torch.from_numpy(image).unsqueeze(0)  # (1, H, W)
+            patch_tensor = torch.from_numpy(patch).unsqueeze(0)  # (1, H, W)
             edge_tensor = torch.from_numpy(edge_map).unsqueeze(0)  # (1, H, W)
             cd_tensor = torch.tensor(cd_targets, dtype=torch.float32)
+            cd_mask_tensor = torch.tensor(cd_mask, dtype=torch.float32)
 
             return {
-                'image': image_tensor,
+                'image': patch_tensor,
                 'edge_map': edge_tensor,
                 'cd_values': cd_tensor,
+                'cd_mask': cd_mask_tensor,  # 1 where we have valid measurements
                 'scale': torch.tensor(annotation.scale_nm_per_pixel, dtype=torch.float32),
+                'patch_coords': torch.tensor([px, py], dtype=torch.int32),
+                'has_edges': torch.tensor(len(measurements) > 0, dtype=torch.bool),
             }
 
-        def _create_edge_map(self, annotation: ImageAnnotation,
-                             target_size: Tuple[int, int]) -> np.ndarray:
-            """Create edge map from annotation"""
-            edge_map = np.zeros(target_size, dtype=np.float32)
+        def _create_patch_edge_map(self, measurements: List[CDAnnotation]) -> np.ndarray:
+            """Create high-resolution edge map for a patch"""
+            edge_map = np.zeros((self.patch_size, self.patch_size), dtype=np.float32)
 
-            orig_h = annotation.image_height or target_size[0]
-            orig_w = annotation.image_width or target_size[1]
+            for m in measurements:
+                y = m.y_position
+                left_x = m.left_edge_x
+                right_x = m.right_edge_x
 
-            scale_y = target_size[0] / orig_h
-            scale_x = target_size[1] / orig_w
+                # Draw edges with sub-pixel Gaussian profile for precise learning
+                for x in [left_x, right_x]:
+                    if 0 <= x < self.patch_size:
+                        # Vertical edge line with Gaussian spread
+                        for dy in range(-5, 6):
+                            yy = y + dy
+                            if 0 <= yy < self.patch_size:
+                                # Gaussian weight for vertical spread
+                                y_weight = np.exp(-dy**2 / 4.0)
 
-            for m in annotation.measurements:
-                y = int(m.y_position * scale_y)
-                left_x = int(m.left_edge_x * scale_x)
-                right_x = int(m.right_edge_x * scale_x)
-
-                # Draw edges with Gaussian profile
-                if 0 <= y < target_size[0]:
-                    for x in [left_x, right_x]:
-                        if 0 <= x < target_size[1]:
-                            # Draw vertical line around edge
-                            for dy in range(-3, 4):
-                                yy = y + dy
-                                if 0 <= yy < target_size[0]:
-                                    weight = np.exp(-dy**2 / 2)
-                                    edge_map[yy, x] = max(edge_map[yy, x], weight)
+                                # Sub-pixel edge with horizontal Gaussian
+                                for dx in range(-3, 4):
+                                    xx = x + dx
+                                    if 0 <= xx < self.patch_size:
+                                        x_weight = np.exp(-dx**2 / 1.0)
+                                        edge_map[yy, xx] = max(
+                                            edge_map[yy, xx],
+                                            y_weight * x_weight
+                                        )
 
             return edge_map
 
-        def _create_cd_targets(self, annotation: ImageAnnotation) -> List[float]:
-            """Create CD targets for each depth"""
+        def _create_patch_cd_targets(self, measurements: List[CDAnnotation]) -> Tuple[List[float], List[float]]:
+            """Create CD targets for each depth in this patch"""
             targets = []
+            mask = []
 
             # Create a mapping from depth to measurement
             depth_to_thickness = {}
-            for m in annotation.measurements:
+            for m in measurements:
                 depth_to_thickness[m.depth_nm] = m.thickness_nm
 
             for depth in self.depths_nm:
                 if depth in depth_to_thickness:
                     targets.append(depth_to_thickness[depth])
+                    mask.append(1.0)  # Valid measurement
                 else:
-                    # Interpolate or use 0
                     targets.append(0.0)
+                    mask.append(0.0)  # No measurement at this depth
 
-            return targets
+            return targets, mask
+
+    # Keep old name for backwards compatibility
+    HRTEMDataset = HRTEMPatchDataset
+
+
+class SlidingWindowInference:
+    """
+    Sliding window inference for full-resolution HR-TEM images.
+
+    Scans the image with overlapping patches and aggregates predictions
+    for high-precision CD measurement.
+    """
+
+    def __init__(self, model, patch_size: int = 256,
+                 stride: int = 128, device: str = 'cpu'):
+        """
+        Args:
+            model: Trained PyTorch model
+            patch_size: Size of patches (must match training)
+            stride: Step size between patches (smaller = more overlap)
+            device: 'cpu' or 'cuda'
+        """
+        self.model = model
+        self.patch_size = patch_size
+        self.stride = stride
+        self.device = device
+
+        self.model.to(device)
+        self.model.eval()
+
+    def predict_full_image(self, image: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Run inference on full resolution image.
+
+        Args:
+            image: Full resolution grayscale image (H, W)
+
+        Returns:
+            Dict with:
+                'edge_map': Aggregated edge probability map
+                'confidence_map': Prediction confidence at each pixel
+                'cd_predictions': List of CD predictions per patch
+        """
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("PyTorch required for inference")
+
+        h, w = image.shape
+
+        # Initialize accumulator maps
+        edge_accum = np.zeros((h, w), dtype=np.float64)
+        weight_accum = np.zeros((h, w), dtype=np.float64)
+        cd_predictions = []
+
+        # Create Gaussian weight kernel for smooth blending
+        weight_kernel = self._create_weight_kernel()
+
+        # Normalize image
+        image_norm = image.astype(np.float32) / 255.0
+
+        with torch.no_grad():
+            # Slide window across image
+            for y in range(0, h - self.patch_size + 1, self.stride):
+                for x in range(0, w - self.patch_size + 1, self.stride):
+                    # Extract patch
+                    patch = image_norm[y:y+self.patch_size, x:x+self.patch_size]
+
+                    # Convert to tensor
+                    patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0)
+                    patch_tensor = patch_tensor.to(self.device)
+
+                    # Run inference
+                    outputs = self.model(patch_tensor)
+
+                    # Extract edge map prediction
+                    if isinstance(outputs, dict):
+                        edge_pred = outputs.get('edge_map', outputs.get('edges'))
+                    else:
+                        edge_pred = outputs[0]
+
+                    edge_pred = edge_pred.squeeze().cpu().numpy()
+
+                    # Accumulate with Gaussian weighting
+                    edge_accum[y:y+self.patch_size, x:x+self.patch_size] += edge_pred * weight_kernel
+                    weight_accum[y:y+self.patch_size, x:x+self.patch_size] += weight_kernel
+
+                    # Store CD predictions if available
+                    if isinstance(outputs, dict) and 'cd_values' in outputs:
+                        cd_pred = outputs['cd_values'].squeeze().cpu().numpy()
+                        cd_predictions.append({
+                            'x': x,
+                            'y': y,
+                            'values': cd_pred.tolist()
+                        })
+
+            # Handle edges of image (areas not covered by full stride)
+            # Process remaining right edge
+            if w % self.stride != 0:
+                x = w - self.patch_size
+                for y in range(0, h - self.patch_size + 1, self.stride):
+                    self._process_patch(image_norm, x, y, edge_accum, weight_accum,
+                                       weight_kernel, cd_predictions)
+
+            # Process remaining bottom edge
+            if h % self.stride != 0:
+                y = h - self.patch_size
+                for x in range(0, w - self.patch_size + 1, self.stride):
+                    self._process_patch(image_norm, x, y, edge_accum, weight_accum,
+                                       weight_kernel, cd_predictions)
+
+        # Normalize accumulated predictions
+        edge_map = np.divide(edge_accum, weight_accum,
+                            where=weight_accum > 0,
+                            out=np.zeros_like(edge_accum))
+
+        # Confidence based on number of overlapping predictions
+        max_overlaps = (self.patch_size / self.stride) ** 2
+        confidence_map = np.clip(weight_accum / max_overlaps, 0, 1)
+
+        return {
+            'edge_map': edge_map.astype(np.float32),
+            'confidence_map': confidence_map.astype(np.float32),
+            'cd_predictions': cd_predictions
+        }
+
+    def _process_patch(self, image_norm, x, y, edge_accum, weight_accum,
+                       weight_kernel, cd_predictions):
+        """Process a single patch"""
+        patch = image_norm[y:y+self.patch_size, x:x+self.patch_size]
+        patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0)
+        patch_tensor = patch_tensor.to(self.device)
+
+        outputs = self.model(patch_tensor)
+
+        if isinstance(outputs, dict):
+            edge_pred = outputs.get('edge_map', outputs.get('edges'))
+        else:
+            edge_pred = outputs[0]
+
+        edge_pred = edge_pred.squeeze().cpu().numpy()
+
+        edge_accum[y:y+self.patch_size, x:x+self.patch_size] += edge_pred * weight_kernel
+        weight_accum[y:y+self.patch_size, x:x+self.patch_size] += weight_kernel
+
+    def _create_weight_kernel(self) -> np.ndarray:
+        """Create Gaussian weight kernel for smooth patch blending"""
+        sigma = self.patch_size / 4
+        center = self.patch_size // 2
+
+        y, x = np.ogrid[:self.patch_size, :self.patch_size]
+        weight = np.exp(-((x - center)**2 + (y - center)**2) / (2 * sigma**2))
+
+        return weight
+
+    def find_edges_at_y(self, edge_map: np.ndarray, y: int,
+                        threshold: float = 0.5,
+                        min_distance: int = 10) -> List[Tuple[float, float]]:
+        """
+        Find edge positions at a specific y coordinate with sub-pixel precision.
+
+        Args:
+            edge_map: Edge probability map
+            y: Y coordinate (depth)
+            threshold: Minimum edge probability
+            min_distance: Minimum distance between edges
+
+        Returns:
+            List of (x_position, confidence) tuples
+        """
+        if y < 0 or y >= edge_map.shape[0]:
+            return []
+
+        line_profile = edge_map[y, :]
+
+        edges = []
+
+        # Find local maxima above threshold
+        for x in range(1, len(line_profile) - 1):
+            if (line_profile[x] > threshold and
+                line_profile[x] > line_profile[x-1] and
+                line_profile[x] > line_profile[x+1]):
+
+                # Sub-pixel refinement using parabolic interpolation
+                y0, y1, y2 = line_profile[x-1], line_profile[x], line_profile[x+1]
+                denom = 2 * (2*y1 - y0 - y2)
+                if abs(denom) > 1e-6:
+                    x_subpixel = x + (y0 - y2) / denom
+                else:
+                    x_subpixel = float(x)
+
+                edges.append((x_subpixel, float(line_profile[x])))
+
+        # Filter by minimum distance
+        if len(edges) > 1:
+            filtered = [edges[0]]
+            for edge in edges[1:]:
+                if edge[0] - filtered[-1][0] >= min_distance:
+                    filtered.append(edge)
+            edges = filtered
+
+        return edges
 
 
 def create_dataloader(data_manager: TrainingDataManager,
                       split: str = 'train',
                       batch_size: int = 8,
                       num_workers: int = 0,
-                      target_size: Tuple[int, int] = (256, 256)) -> 'DataLoader':
+                      patch_size: int = 256,
+                      patches_per_image: int = 20) -> 'DataLoader':
     """
-    Create a DataLoader for training.
+    Create a DataLoader for patch-based training.
 
     Args:
         data_manager: TrainingDataManager instance
         split: 'train' or 'val'
         batch_size: Batch size
         num_workers: Number of data loading workers (0 for CPU)
-        target_size: Target image size
+        patch_size: Size of patches to extract
+        patches_per_image: Number of patches per image
 
     Returns:
         DataLoader instance
@@ -511,7 +838,12 @@ def create_dataloader(data_manager: TrainingDataManager,
     if not TORCH_AVAILABLE:
         raise RuntimeError("PyTorch is required for DataLoader")
 
-    dataset = HRTEMDataset(data_manager, split=split, target_size=target_size)
+    dataset = HRTEMPatchDataset(
+        data_manager,
+        split=split,
+        patch_size=patch_size,
+        patches_per_image=patches_per_image
+    )
 
     return DataLoader(
         dataset,

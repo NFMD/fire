@@ -43,8 +43,9 @@ class TrainingConfig:
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
 
-    # Image
-    image_size: Tuple[int, int] = (256, 256)
+    # Patch-based training (original resolution!)
+    patch_size: int = 256  # Size of patches extracted from original image
+    patches_per_image: int = 20  # Number of patches per image
 
     # Loss weights
     edge_loss_weight: float = 1.0
@@ -71,9 +72,8 @@ class CombinedLoss(nn.Module):
         self.edge_weight = edge_weight
         self.cd_weight = cd_weight
 
-        self.bce_loss = nn.BCELoss()
-        self.mse_loss = nn.MSELoss()
-        self.smooth_l1 = nn.SmoothL1Loss()
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
+        self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
 
     def forward(self, predictions: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
                 targets: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -82,7 +82,7 @@ class CombinedLoss(nn.Module):
 
         Args:
             predictions: (edge_map, cd_values, confidence)
-            targets: Dict with 'edge_map' and 'cd_values'
+            targets: Dict with 'edge_map', 'cd_values', 'cd_mask', 'has_edges'
 
         Returns:
             total_loss, loss_dict
@@ -90,25 +90,45 @@ class CombinedLoss(nn.Module):
         pred_edge, pred_cd, pred_conf = predictions
         target_edge = targets['edge_map']
         target_cd = targets['cd_values']
+        cd_mask = targets.get('cd_mask', (target_cd != 0).float())
+        has_edges = targets.get('has_edges', torch.ones(pred_edge.shape[0], dtype=torch.bool))
 
-        # Edge segmentation loss (BCE)
-        edge_loss = self.bce_loss(pred_edge, target_edge)
+        # Edge segmentation loss (BCE with logits)
+        # Weight edges more heavily since they are sparse
+        edge_weight_map = torch.where(target_edge > 0.1, 10.0, 1.0)
+        edge_loss_raw = self.bce_loss(pred_edge, target_edge)
+        edge_loss = (edge_loss_raw * edge_weight_map).mean()
 
         # CD regression loss (Smooth L1 for robustness)
-        # Only compute loss for non-zero targets (annotated depths)
-        mask = target_cd != 0
-        if mask.any():
-            cd_loss = self.smooth_l1(pred_cd[mask], target_cd[mask])
+        # Only compute loss for patches with valid measurements
+        cd_loss_raw = self.smooth_l1(pred_cd, target_cd)
+        masked_cd_loss = cd_loss_raw * cd_mask
+
+        if cd_mask.sum() > 0:
+            cd_loss = masked_cd_loss.sum() / cd_mask.sum()
         else:
             cd_loss = torch.tensor(0.0, device=pred_cd.device)
 
+        # Confidence loss: model should know when it has valid predictions
+        if has_edges is not None:
+            has_edges_float = has_edges.float().unsqueeze(1)
+            conf_loss = nn.functional.binary_cross_entropy(
+                pred_conf.mean(dim=1, keepdim=True),
+                has_edges_float
+            )
+        else:
+            conf_loss = torch.tensor(0.0, device=pred_conf.device)
+
         # Total loss
-        total_loss = self.edge_weight * edge_loss + self.cd_weight * cd_loss
+        total_loss = (self.edge_weight * edge_loss +
+                     self.cd_weight * cd_loss +
+                     0.1 * conf_loss)
 
         return total_loss, {
             'total': total_loss.item(),
             'edge': edge_loss.item(),
             'cd': cd_loss.item(),
+            'conf': conf_loss.item() if isinstance(conf_loss, torch.Tensor) else conf_loss,
         }
 
 
