@@ -34,14 +34,14 @@ class ScaleInfo:
     source: str = "unknown"  # Source of scale info (metadata, ocr, manual)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
+        """Convert to dictionary with native Python types"""
         return {
-            'scale_nm_per_pixel': self.scale_nm_per_pixel,
-            'scale_bar_length_nm': self.scale_bar_length_nm,
-            'magnification': self.magnification,
-            'accelerating_voltage_kv': self.accelerating_voltage_kv,
-            'unit': self.unit,
-            'source': self.source,
+            'scale_nm_per_pixel': float(self.scale_nm_per_pixel) if self.scale_nm_per_pixel is not None else None,
+            'scale_bar_length_nm': float(self.scale_bar_length_nm) if self.scale_bar_length_nm is not None else None,
+            'magnification': int(self.magnification) if self.magnification is not None else None,
+            'accelerating_voltage_kv': float(self.accelerating_voltage_kv) if self.accelerating_voltage_kv is not None else None,
+            'unit': str(self.unit),
+            'source': str(self.source),
         }
 
 

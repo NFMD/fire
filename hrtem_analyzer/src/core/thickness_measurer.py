@@ -54,19 +54,19 @@ class MeasurementResult:
     individual_measurements: List[SingleMeasurement] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
-        """Convert to dictionary"""
+        """Convert to dictionary with native Python types"""
         return {
-            'depth_nm': self.depth_nm,
-            'thickness_nm': self.thickness_nm,
-            'thickness_std': self.thickness_std,
-            'thickness_min': self.thickness_min,
-            'thickness_max': self.thickness_max,
-            'confidence': self.confidence,
-            'y_position': self.y_position,
-            'left_edge_x': self.left_edge_x,
-            'right_edge_x': self.right_edge_x,
-            'num_measurements': self.num_measurements,
-            'consensus_method': self.consensus_method,
+            'depth_nm': float(self.depth_nm),
+            'thickness_nm': float(self.thickness_nm),
+            'thickness_std': float(self.thickness_std),
+            'thickness_min': float(self.thickness_min),
+            'thickness_max': float(self.thickness_max),
+            'confidence': float(self.confidence),
+            'y_position': int(self.y_position),
+            'left_edge_x': int(self.left_edge_x),
+            'right_edge_x': int(self.right_edge_x),
+            'num_measurements': int(self.num_measurements),
+            'consensus_method': str(self.consensus_method),
         }
 
 

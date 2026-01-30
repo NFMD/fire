@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import cv2
 from loguru import logger
@@ -15,6 +15,40 @@ from loguru import logger
 from .image_loader import ScaleInfo
 from .baseline_detector import BaselineInfo
 from .thickness_measurer import MeasurementResult
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles numpy types"""
+
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        return super().default(obj)
+
+
+def convert_numpy_types(obj: Any) -> Any:
+    """Recursively convert numpy types to native Python types"""
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_types(v) for v in obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
 
 
 class ResultVisualizer:
@@ -504,7 +538,7 @@ class ResultExporter:
                 measurements, scale_info, baseline_info, source_path
             )
             with open(json_path, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, cls=NumpyEncoder)
             logger.info(f"Saved data: {json_path}")
 
         return str(jpeg_path), str(json_path) if json_path else None
@@ -530,11 +564,11 @@ class ResultExporter:
             'timestamp': datetime.now().isoformat(),
             'total_images': len(results),
             'successful': sum(1 for r in results if r.get('success', False)),
-            'results': results
+            'results': convert_numpy_types(results)
         }
 
         with open(summary_path, 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary, f, indent=2, cls=NumpyEncoder)
 
         logger.info(f"Saved batch summary: {summary_path}")
         return str(summary_path)
@@ -609,13 +643,13 @@ class ResultExporter:
     ) -> Dict:
         """Create JSON-serializable data dictionary"""
         return {
-            'source_path': source_path,
+            'source_path': str(source_path),
             'timestamp': datetime.now().isoformat(),
             'scale': scale_info.to_dict(),
             'baseline': {
-                'y_position': baseline_info.y_position,
-                'confidence': baseline_info.confidence,
-                'method': baseline_info.method
+                'y_position': int(baseline_info.y_position),
+                'confidence': float(baseline_info.confidence),
+                'method': str(baseline_info.method)
             },
             'measurements': {
                 str(depth): m.to_dict()

@@ -23,6 +23,7 @@ from .widgets import (
     FFTViewerWidget,
     TrainingPanel
 )
+from ..core.result_exporter import NumpyEncoder, convert_numpy_types
 
 
 class AnalysisWorker(QThread):
@@ -576,7 +577,7 @@ class MainWindow(QMainWindow):
             try:
                 if file_path.endswith('.json'):
                     with open(file_path, 'w') as f:
-                        json.dump(self.results, f, indent=2)
+                        json.dump(convert_numpy_types(self.results), f, indent=2, cls=NumpyEncoder)
                 elif file_path.endswith('.csv'):
                     self._export_csv(file_path)
 

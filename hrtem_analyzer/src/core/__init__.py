@@ -5,7 +5,7 @@ from .image_loader import TIFFLoader, ScaleInfo
 from .preprocessor import ImagePreprocessor
 from .baseline_detector import BaselineDetector
 from .thickness_measurer import ThicknessMeasurer, MeasurementResult
-from .result_exporter import ResultExporter
+from .result_exporter import ResultExporter, NumpyEncoder, convert_numpy_types
 
 # Advanced analysis (Gatan DM-style features)
 from .advanced_analysis import (
@@ -40,6 +40,8 @@ __all__ = [
     'ThicknessMeasurer',
     'MeasurementResult',
     'ResultExporter',
+    'NumpyEncoder',
+    'convert_numpy_types',
     # Advanced analysis
     'LineProfileAnalyzer',
     'FFTAnalyzer',

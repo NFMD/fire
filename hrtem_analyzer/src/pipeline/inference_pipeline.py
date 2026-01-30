@@ -26,7 +26,7 @@ from core.thickness_measurer import (
     MultiVariantMeasurer,
     MeasurementResult
 )
-from core.result_exporter import ResultExporter, ResultVisualizer
+from core.result_exporter import ResultExporter, ResultVisualizer, convert_numpy_types
 from core.enhanced_measurer import EnhancedCDMeasurer, EnhancedMeasurementResult, HybridMeasurer
 from core.advanced_analysis import FFTAnalyzer, StatisticalAnalyzer
 from pipeline.batch_processor import BatchProcessor, WorkingGroup, ImageResult
@@ -320,46 +320,46 @@ class InferencePipeline:
                 save_json=self.config.save_json
             )
 
-        # 8. Create result dictionary
+        # 8. Create result dictionary (convert all numpy types to native Python)
         result = {
-            'source_path': image_path,
+            'source_path': str(image_path),
             'success': True,
             'scale_info': scale_info.to_dict(),
-            'calibrated_scale': calibrated_scale,
+            'calibrated_scale': float(calibrated_scale),
             'baseline': {
-                'y_position': baseline_info.y_position,
-                'confidence': baseline_info.confidence,
-                'method': baseline_info.method
+                'y_position': int(baseline_info.y_position),
+                'confidence': float(baseline_info.confidence),
+                'method': str(baseline_info.method)
             },
-            'level_angle': level_angle,
+            'level_angle': float(level_angle),
             'measurements': {
-                depth: m.to_dict() for depth, m in measurements.items()
+                str(depth): m.to_dict() for depth, m in measurements.items()
             },
             'output': {
-                'jpeg_path': jpeg_path,
-                'json_path': json_path
+                'jpeg_path': str(jpeg_path) if jpeg_path else None,
+                'json_path': str(json_path) if json_path else None
             },
             'analysis_mode': 'enhanced' if enhanced else 'standard',
             'statistics': {
-                'preprocessing_methods': self.config.preprocessing_methods,
-                'rotation_angles': self.config.rotation_angles,
-                'edge_methods': self.config.edge_methods,
-                'profile_methods': self.config.profile_methods if enhanced else [],
-                'background_method': self.config.background_method if enhanced else 'none',
+                'preprocessing_methods': list(self.config.preprocessing_methods),
+                'rotation_angles': [float(a) for a in self.config.rotation_angles],
+                'edge_methods': list(self.config.edge_methods),
+                'profile_methods': list(self.config.profile_methods) if enhanced else [],
+                'background_method': str(self.config.background_method) if enhanced else 'none',
             }
         }
 
-        # Add enhanced metrics if available
+        # Add enhanced metrics if available (convert numpy types)
         if enhanced_metrics:
-            result['enhanced_metrics'] = enhanced_metrics
+            result['enhanced_metrics'] = convert_numpy_types(enhanced_metrics)
 
-        # Add FFT result if available
+        # Add FFT result if available (convert numpy types)
         if fft_result:
             result['fft_analysis'] = {
-                'periodicity_nm': fft_result.periodicity_nm,
-                'orientation_deg': fft_result.orientation_deg,
-                'lattice_spacing_nm': fft_result.lattice_spacing_nm,
-                'confidence': fft_result.confidence
+                'periodicity_nm': float(fft_result.periodicity_nm) if fft_result.periodicity_nm else None,
+                'orientation_deg': float(fft_result.orientation_deg) if fft_result.orientation_deg else None,
+                'lattice_spacing_nm': float(fft_result.lattice_spacing_nm) if fft_result.lattice_spacing_nm else None,
+                'confidence': float(fft_result.confidence) if fft_result.confidence else None
             }
 
         # Cleanup

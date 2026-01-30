@@ -76,6 +76,64 @@ class EnhancedMeasurementResult(MeasurementResult):
     atomic_spacing_nm: Optional[float] = None
     precision_confidence: Optional[float] = None
 
+    def to_dict(self) -> Dict:
+        """Convert to dictionary with native Python types"""
+        # Start with parent class fields
+        result = {
+            'depth_nm': float(self.depth_nm),
+            'thickness_nm': float(self.thickness_nm),
+            'thickness_std': float(self.thickness_std),
+            'thickness_min': float(self.thickness_min),
+            'thickness_max': float(self.thickness_max),
+            'confidence': float(self.confidence),
+            'y_position': int(self.y_position),
+            'left_edge_x': int(self.left_edge_x),
+            'right_edge_x': int(self.right_edge_x),
+            'num_measurements': int(self.num_measurements),
+            'consensus_method': str(self.consensus_method),
+        }
+
+        # Add enhanced fields (convert numpy types)
+        if self.fwhm_nm is not None:
+            result['fwhm_nm'] = float(self.fwhm_nm)
+        if self.edge_sharpness_left is not None:
+            result['edge_sharpness_left'] = float(self.edge_sharpness_left)
+        if self.edge_sharpness_right is not None:
+            result['edge_sharpness_right'] = float(self.edge_sharpness_right)
+
+        result['scale_calibrated'] = bool(self.scale_calibrated)
+        result['calibration_factor'] = float(self.calibration_factor)
+        result['background_corrected'] = bool(self.background_corrected)
+        result['background_level'] = float(self.background_level)
+        result['measurement_uncertainty_nm'] = float(self.measurement_uncertainty_nm)
+        result['confidence_interval_95'] = (
+            float(self.confidence_interval_95[0]),
+            float(self.confidence_interval_95[1])
+        )
+
+        # Convert method_results dict (keys might be strings, values might be numpy)
+        result['method_results'] = {
+            str(k): float(v) for k, v in self.method_results.items()
+        }
+
+        # Precision fields
+        if self.sub_pixel_positions is not None:
+            result['sub_pixel_positions'] = [float(x) for x in self.sub_pixel_positions]
+        if self.esf_width_nm is not None:
+            result['esf_width_nm'] = float(self.esf_width_nm)
+        if self.lsf_fwhm_nm is not None:
+            result['lsf_fwhm_nm'] = float(self.lsf_fwhm_nm)
+        if self.snr_db is not None:
+            result['snr_db'] = float(self.snr_db)
+        if self.monte_carlo_std is not None:
+            result['monte_carlo_std'] = float(self.monte_carlo_std)
+        if self.atomic_spacing_nm is not None:
+            result['atomic_spacing_nm'] = float(self.atomic_spacing_nm)
+        if self.precision_confidence is not None:
+            result['precision_confidence'] = float(self.precision_confidence)
+
+        return result
+
 
 class EnhancedCDMeasurer:
     """
