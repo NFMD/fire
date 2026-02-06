@@ -6,8 +6,12 @@ Provides interactive image viewing with:
 - Baseline (0-point) selection via click
 - Manual measurement drawing
 - Measurement overlay
+- Grid/ruler overlay
 - Scale bar display
 - Auto-leveling support
+- Undo support
+- DM3/DM4 file support
+- Analysis result overlay
 """
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -18,12 +22,13 @@ from PyQt6.QtWidgets import (
     QScrollArea, QFrame, QPushButton, QSlider,
     QCheckBox, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsTextItem,
-    QGraphicsEllipseItem
+    QGraphicsEllipseItem, QGraphicsRectItem
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QLineF
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor,
-    QWheelEvent, QMouseEvent, QFont, QBrush
+    QWheelEvent, QMouseEvent, QFont, QBrush, QKeySequence,
+    QShortcut
 )
 
 try:
@@ -222,13 +227,16 @@ class ImageViewerWidget(QWidget):
     Image viewer widget with baseline selection and manual measurement.
 
     Features:
-    - Load and display TIFF images
+    - Load and display TIFF/DM3/DM4 images
     - Zoom and pan
     - Click to set baseline (0-point)
     - Interactive manual CD measurement
     - Show measurement overlays
+    - Grid/ruler overlay
     - Display scale information
     - Auto-leveling support
+    - Undo (Ctrl+Z)
+    - Analysis result overlay
     """
 
     baseline_changed = pyqtSignal(int)  # y position
@@ -247,7 +255,11 @@ class ImageViewerWidget(QWidget):
         self._baseline_text: Optional[QGraphicsTextItem] = None
         self._measurement_items: List = []
         self._manual_measurement_items: List = []
+        self._result_overlay_items: List = []
+        self._grid_items: List = []
+        self._undo_stack: List = []  # Stack for undo operations
         self._current_rotation: float = 0.0
+        self._show_grid = False
 
         self._setup_ui()
 
@@ -277,7 +289,7 @@ class ImageViewerWidget(QWidget):
         self.fit_btn.clicked.connect(self._on_fit)
         toolbar.addWidget(self.fit_btn)
 
-        toolbar.addSpacing(20)
+        toolbar.addSpacing(10)
 
         # Baseline mode toggle
         self.baseline_btn = QPushButton("Set Baseline")
@@ -286,11 +298,43 @@ class ImageViewerWidget(QWidget):
         self.baseline_btn.toggled.connect(self._on_baseline_mode)
         toolbar.addWidget(self.baseline_btn)
 
+        # Delete baseline button
+        self.delete_baseline_btn = QPushButton("Del BL")
+        self.delete_baseline_btn.setToolTip("Delete baseline")
+        self.delete_baseline_btn.setFixedWidth(55)
+        self.delete_baseline_btn.clicked.connect(self._on_delete_baseline)
+        toolbar.addWidget(self.delete_baseline_btn)
+
+        toolbar.addSpacing(10)
+
         # Show measurements toggle
-        self.show_measurements_cb = QCheckBox("Show Measurements")
+        self.show_measurements_cb = QCheckBox("Overlay")
         self.show_measurements_cb.setChecked(True)
+        self.show_measurements_cb.setToolTip("Show measurement overlays")
         self.show_measurements_cb.toggled.connect(self._on_toggle_measurements)
         toolbar.addWidget(self.show_measurements_cb)
+
+        # Grid toggle
+        self.show_grid_cb = QCheckBox("Grid")
+        self.show_grid_cb.setToolTip("Show grid/ruler overlay")
+        self.show_grid_cb.toggled.connect(self._on_toggle_grid)
+        toolbar.addWidget(self.show_grid_cb)
+
+        toolbar.addSpacing(10)
+
+        # Undo button
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.setFixedWidth(55)
+        self.undo_btn.setToolTip("Undo last action (Ctrl+Z)")
+        self.undo_btn.clicked.connect(self.undo)
+        toolbar.addWidget(self.undo_btn)
+
+        # Scale bar OCR detect
+        self.ocr_btn = QPushButton("OCR Scale")
+        self.ocr_btn.setFixedWidth(75)
+        self.ocr_btn.setToolTip("Auto-detect scale bar from image")
+        self.ocr_btn.clicked.connect(self._on_ocr_scale)
+        toolbar.addWidget(self.ocr_btn)
 
         toolbar.addStretch()
 
@@ -316,115 +360,143 @@ class ImageViewerWidget(QWidget):
         self.position_label.setObjectName("subtitleLabel")
         layout.addWidget(self.position_label)
 
+        # Setup keyboard shortcut for undo
+        undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        undo_shortcut.activated.connect(self.undo)
+
     def load_image(self, path: str) -> bool:
         """
-        Load an image from file.
+        Load an image from file (TIFF, DM3, DM4).
 
         Args:
-            path: Path to TIFF image
+            path: Path to image file
 
         Returns:
             True if successful
         """
         try:
-            if tifffile is None:
-                raise ImportError("tifffile not installed")
+            ext = Path(path).suffix.lower()
 
-            # Load image
-            with tifffile.TiffFile(path) as tif:
-                self._image_data = tif.asarray()
-
-                # Try to extract scale from metadata
-                self._scale_nm_per_pixel = self._extract_scale(tif)
-
-            # Convert to display format
-            if len(self._image_data.shape) == 3:
-                # RGB or RGBA
-                if self._image_data.shape[2] >= 3:
-                    display_data = self._image_data[:, :, :3]
-                else:
-                    display_data = self._image_data[:, :, 0]
+            if ext in ('.dm3', '.dm4'):
+                return self._load_dm_image(path)
             else:
-                display_data = self._image_data
-
-            # Normalize to 0-255
-            if display_data.dtype != np.uint8:
-                dmin, dmax = display_data.min(), display_data.max()
-                if dmax > dmin:
-                    display_data = ((display_data - dmin) / (dmax - dmin) * 255).astype(np.uint8)
-                else:
-                    display_data = np.zeros_like(display_data, dtype=np.uint8)
-
-            # Create QImage
-            h, w = display_data.shape[:2]
-            if len(display_data.shape) == 2:
-                # Grayscale
-                qimage = QImage(
-                    display_data.data, w, h, w,
-                    QImage.Format.Format_Grayscale8
-                )
-            else:
-                # RGB
-                bytes_per_line = 3 * w
-                qimage = QImage(
-                    display_data.data, w, h, bytes_per_line,
-                    QImage.Format.Format_RGB888
-                )
-
-            # Clear scene and add image
-            self.scene.clear()
-            self._baseline_line = None
-            self._measurement_items = []
-
-            pixmap = QPixmap.fromImage(qimage)
-            self.scene.addPixmap(pixmap)
-            self.scene.setSceneRect(QRectF(pixmap.rect()))
-
-            # Store data for pixel queries
-            self.view.set_image_data(self._image_data)
-
-            # Update info
-            self._image_path = path
-            self.info_label.setText(
-                f"{Path(path).name} | {w}x{h} | {self._scale_nm_per_pixel:.4f} nm/px"
-            )
-
-            # Fit to view
-            self.view.fit_to_window()
-
-            # Restore baseline if set
-            if self._baseline_y is not None:
-                self._draw_baseline(self._baseline_y)
-
-            return True
+                return self._load_tiff_image(path)
 
         except Exception as e:
             self.info_label.setText(f"Error: {e}")
             return False
 
+    def _load_tiff_image(self, path: str) -> bool:
+        """Load TIFF image"""
+        if tifffile is None:
+            raise ImportError("tifffile not installed")
+
+        with tifffile.TiffFile(path) as tif:
+            self._image_data = tif.asarray()
+            self._scale_nm_per_pixel = self._extract_scale(tif)
+
+        return self._finish_load(path)
+
+    def _load_dm_image(self, path: str) -> bool:
+        """Load DM3/DM4 image"""
+        from ...core.dm_loader import DMFileLoader
+        dm_loader = DMFileLoader()
+        image, dm_scale = dm_loader.load(path, normalize=False)
+        self._image_data = image
+        self._scale_nm_per_pixel = dm_loader.get_scale_nm_per_pixel(dm_scale)
+        return self._finish_load(path)
+
+    def _finish_load(self, path: str) -> bool:
+        """Common logic after loading image data"""
+        # Convert to display format
+        if len(self._image_data.shape) == 3:
+            if self._image_data.shape[2] >= 3:
+                display_data = self._image_data[:, :, :3]
+            else:
+                display_data = self._image_data[:, :, 0]
+        else:
+            display_data = self._image_data
+
+        # Normalize to 0-255
+        if display_data.dtype != np.uint8:
+            dmin, dmax = float(display_data.min()), float(display_data.max())
+            if dmax > dmin:
+                display_data = ((display_data - dmin) / (dmax - dmin) * 255).astype(np.uint8)
+            else:
+                display_data = np.zeros_like(display_data, dtype=np.uint8)
+
+        # Store for display updates
+        self._display_data = display_data
+
+        # Create QImage
+        h, w = display_data.shape[:2]
+        if len(display_data.shape) == 2:
+            qimage = QImage(
+                display_data.data, w, h, w,
+                QImage.Format.Format_Grayscale8
+            )
+        else:
+            bytes_per_line = 3 * w
+            qimage = QImage(
+                display_data.data, w, h, bytes_per_line,
+                QImage.Format.Format_RGB888
+            )
+
+        # Clear scene and add image
+        self.scene.clear()
+        self._baseline_line = None
+        self._baseline_text = None
+        self._measurement_items = []
+        self._manual_measurement_items = []
+        self._result_overlay_items = []
+        self._grid_items = []
+        self._undo_stack = []
+
+        pixmap = QPixmap.fromImage(qimage)
+        self.scene.addPixmap(pixmap)
+        self.scene.setSceneRect(QRectF(pixmap.rect()))
+
+        # Store data for pixel queries
+        self.view.set_image_data(self._image_data)
+
+        # Update info
+        self._image_path = path
+        self.info_label.setText(
+            f"{Path(path).name} | {w}x{h} | {self._scale_nm_per_pixel:.4f} nm/px"
+        )
+
+        # Fit to view
+        self.view.fit_to_window()
+
+        # Restore baseline if set
+        if self._baseline_y is not None:
+            self._draw_baseline(self._baseline_y)
+
+        # Show grid if enabled
+        if self._show_grid:
+            self._draw_grid()
+
+        return True
+
     def _extract_scale(self, tif) -> float:
         """Extract scale from TIFF metadata"""
         try:
-            # Try FEI metadata
             if hasattr(tif, 'fei_metadata') and tif.fei_metadata:
                 fei = tif.fei_metadata
                 if 'Scan' in fei and 'PixelWidth' in fei['Scan']:
                     return fei['Scan']['PixelWidth'] * 1e9
 
-            # Try ImageJ metadata
             if hasattr(tif, 'imagej_metadata') and tif.imagej_metadata:
                 ij = tif.imagej_metadata
                 if 'spacing' in ij:
                     unit = ij.get('unit', 'pixel').lower()
                     if unit == 'nm':
                         return ij['spacing']
-                    elif unit in ('um', 'µm'):
+                    elif unit in ('um', '\u00b5m'):
                         return ij['spacing'] * 1000
-
         except Exception:
             pass
-
-        return 1.0  # Default
+        return 1.0
 
     @property
     def baseline_y(self) -> Optional[int]:
@@ -438,6 +510,19 @@ class ImageViewerWidget(QWidget):
             self._draw_baseline(y)
             self.baseline_changed.emit(y)
 
+    def delete_baseline(self):
+        """Delete the baseline"""
+        if self._baseline_line:
+            self.scene.removeItem(self._baseline_line)
+            self._baseline_line = None
+        if self._baseline_text:
+            self.scene.removeItem(self._baseline_text)
+            self._baseline_text = None
+        old_y = self._baseline_y
+        self._baseline_y = None
+        if old_y is not None:
+            self._undo_stack.append(('baseline', old_y))
+
     def _draw_baseline(self, y: int):
         """Draw baseline on the image"""
         if self._image_data is None:
@@ -448,6 +533,8 @@ class ImageViewerWidget(QWidget):
         # Remove old baseline
         if self._baseline_line:
             self.scene.removeItem(self._baseline_line)
+        if self._baseline_text:
+            self.scene.removeItem(self._baseline_text)
 
         # Draw new baseline
         pen = QPen(QColor("#ff0000"))
@@ -455,16 +542,19 @@ class ImageViewerWidget(QWidget):
         self._baseline_line = self.scene.addLine(0, y, w, y, pen)
 
         # Add label
-        text = self.scene.addText("0 nm (Baseline)", QFont("Arial", 10))
-        text.setDefaultTextColor(QColor("#ff0000"))
-        text.setPos(10, y - 20)
+        self._baseline_text = self.scene.addText("0 nm (Baseline)", QFont("Arial", 10))
+        self._baseline_text.setDefaultTextColor(QColor("#ff0000"))
+        self._baseline_text.setPos(10, y - 20)
 
     def _on_baseline_set(self, y: int):
         """Handle baseline set from click"""
+        old_y = self._baseline_y
         self._baseline_y = y
         self._draw_baseline(y)
         self.baseline_btn.setChecked(False)
         self.baseline_changed.emit(y)
+        # Save for undo
+        self._undo_stack.append(('baseline_set', old_y))
 
     def _on_baseline_mode(self, enabled: bool):
         """Toggle baseline setting mode"""
@@ -473,6 +563,10 @@ class ImageViewerWidget(QWidget):
             self.baseline_btn.setText("Click Image...")
         else:
             self.baseline_btn.setText("Set Baseline")
+
+    def _on_delete_baseline(self):
+        """Delete baseline button handler"""
+        self.delete_baseline()
 
     def _on_position_changed(self, x: int, y: int, value: float):
         """Handle mouse position change"""
@@ -491,30 +585,170 @@ class ImageViewerWidget(QWidget):
         """Toggle measurement overlay visibility"""
         for item in self._measurement_items:
             item.setVisible(show)
+        for item in self._result_overlay_items:
+            item.setVisible(show)
+
+    def _on_toggle_grid(self, show: bool):
+        """Toggle grid overlay"""
+        self._show_grid = show
+        if show:
+            self._draw_grid()
+        else:
+            self._clear_grid()
+
+    def _draw_grid(self):
+        """Draw grid/ruler overlay on the image"""
+        if self._image_data is None:
+            return
+
+        self._clear_grid()
+
+        h, w = self._image_data.shape[:2]
+        scale = self._scale_nm_per_pixel
+
+        # Determine grid spacing based on image size and scale
+        image_width_nm = w * scale
+        image_height_nm = h * scale
+
+        # Choose nice grid spacing
+        grid_spacing_nm = self._get_nice_grid_spacing(image_width_nm / 5)
+        grid_spacing_px = grid_spacing_nm / scale
+
+        if grid_spacing_px < 20:
+            return  # Grid too dense
+
+        # Grid pen (semi-transparent)
+        grid_pen = QPen(QColor(100, 200, 255, 60))
+        grid_pen.setWidth(1)
+        grid_pen.setStyle(Qt.PenStyle.DotLine)
+
+        # Ruler pen
+        ruler_pen = QPen(QColor(100, 200, 255, 120))
+        ruler_pen.setWidth(1)
+
+        # Ruler text color
+        text_color = QColor(100, 200, 255, 180)
+
+        # Vertical grid lines
+        x = 0.0
+        while x < w:
+            line = self.scene.addLine(x, 0, x, h, grid_pen)
+            self._grid_items.append(line)
+
+            # Label
+            nm_val = x * scale
+            if nm_val >= 1000:
+                label = f"{nm_val/1000:.1f}um"
+            else:
+                label = f"{nm_val:.0f}nm"
+            text = self.scene.addText(label, QFont("Arial", 7))
+            text.setDefaultTextColor(text_color)
+            text.setPos(x + 2, 2)
+            self._grid_items.append(text)
+
+            x += grid_spacing_px
+
+        # Horizontal grid lines
+        y = 0.0
+        while y < h:
+            line = self.scene.addLine(0, y, w, y, grid_pen)
+            self._grid_items.append(line)
+
+            nm_val = y * scale
+            if nm_val >= 1000:
+                label = f"{nm_val/1000:.1f}um"
+            else:
+                label = f"{nm_val:.0f}nm"
+            text = self.scene.addText(label, QFont("Arial", 7))
+            text.setDefaultTextColor(text_color)
+            text.setPos(2, y + 2)
+            self._grid_items.append(text)
+
+            y += grid_spacing_px
+
+        # Draw ruler bars on edges
+        # Top ruler
+        ruler_y = 0
+        tick_x = 0.0
+        while tick_x < w:
+            tick_line = self.scene.addLine(tick_x, ruler_y, tick_x, ruler_y + 8, ruler_pen)
+            self._grid_items.append(tick_line)
+            tick_x += grid_spacing_px / 5
+
+        # Left ruler
+        ruler_x = 0
+        tick_y = 0.0
+        while tick_y < h:
+            tick_line = self.scene.addLine(ruler_x, tick_y, ruler_x + 8, tick_y, ruler_pen)
+            self._grid_items.append(tick_line)
+            tick_y += grid_spacing_px / 5
+
+    def _get_nice_grid_spacing(self, approximate_nm: float) -> float:
+        """Get a 'nice' grid spacing value"""
+        nice_values = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+        for value in nice_values:
+            if value >= approximate_nm * 0.5:
+                return value
+        return nice_values[-1]
+
+    def _clear_grid(self):
+        """Remove all grid items"""
+        for item in self._grid_items:
+            self.scene.removeItem(item)
+        self._grid_items = []
 
     def _on_zoom_in(self):
-        """Zoom in button clicked"""
         self.view.zoom_in()
 
     def _on_zoom_out(self):
-        """Zoom out button clicked"""
         self.view.zoom_out()
 
     def _on_fit(self):
-        """Fit button clicked"""
         self.view.fit_to_window()
 
     def zoom_in(self):
-        """Public zoom in method"""
         self.view.zoom_in()
 
     def zoom_out(self):
-        """Public zoom out method"""
         self.view.zoom_out()
 
     def fit_to_window(self):
-        """Public fit to window method"""
         self.view.fit_to_window()
+
+    def _on_ocr_scale(self):
+        """Auto-detect scale bar from image using OCR"""
+        if self._image_data is None:
+            return
+
+        try:
+            from ...core.scale_bar_detector import ScaleBarDetector
+            detector = ScaleBarDetector()
+
+            # Prepare image for detection
+            img = self._image_data
+            if img.max() <= 1.0:
+                img = (img * 255).astype(np.uint8)
+            elif img.dtype != np.uint8:
+                dmin, dmax = float(img.min()), float(img.max())
+                if dmax > dmin:
+                    img = ((img - dmin) / (dmax - dmin) * 255).astype(np.uint8)
+                else:
+                    img = np.zeros_like(img, dtype=np.uint8)
+
+            result = detector.detect_scale_bar(img)
+            if result and result['nm_per_pixel']:
+                self._scale_nm_per_pixel = result['nm_per_pixel']
+                self.info_label.setText(
+                    f"{Path(self._image_path).name} | "
+                    f"{self._image_data.shape[1]}x{self._image_data.shape[0]} | "
+                    f"{self._scale_nm_per_pixel:.4f} nm/px (OCR)"
+                )
+            else:
+                self.info_label.setText(
+                    f"{Path(self._image_path).name} | Scale bar not detected"
+                )
+        except Exception as e:
+            self.info_label.setText(f"OCR failed: {e}")
 
     def add_measurement_overlay(
             self,
@@ -532,18 +766,15 @@ class ImageViewerWidget(QWidget):
         w = self._image_data.shape[1]
         qcolor = QColor(color)
 
-        # Measurement line
         pen = QPen(qcolor)
         pen.setWidth(2)
         line = self.scene.addLine(left_x, y, right_x, y, pen)
         self._measurement_items.append(line)
 
-        # Edge markers
         for x in [left_x, right_x]:
             marker = self.scene.addEllipse(x - 4, y - 4, 8, 8, pen, QBrush(qcolor))
             self._measurement_items.append(marker)
 
-        # Label
         text = self.scene.addText(
             f"{depth_nm:.0f}nm: {thickness_nm:.2f}nm",
             QFont("Arial", 9)
@@ -552,6 +783,121 @@ class ImageViewerWidget(QWidget):
         text.setPos(right_x + 10, y - 8)
         self._measurement_items.append(text)
 
+    def add_result_overlay(self, result: dict):
+        """
+        Add analysis result as editable overlay on the image.
+
+        Draws measurement lines, edge markers, rulers, and info panel.
+        """
+        if self._image_data is None:
+            return
+
+        self.clear_result_overlays()
+
+        h, w = self._image_data.shape[:2]
+        measurements = result.get('measurements', {})
+        baseline = result.get('baseline', {})
+        baseline_y = baseline.get('y_position', 0)
+
+        # Draw baseline
+        if baseline_y > 0:
+            pen = QPen(QColor("#ff4444"))
+            pen.setWidth(2)
+            line = self.scene.addLine(0, baseline_y, w, baseline_y, pen)
+            self._result_overlay_items.append(line)
+
+            text = self.scene.addText("Baseline (0nm)", QFont("Arial", 9))
+            text.setDefaultTextColor(QColor("#ff4444"))
+            text.setPos(10, baseline_y - 18)
+            self._result_overlay_items.append(text)
+
+        # Color palette for measurements
+        colors = ["#00ff00", "#00ffff", "#ffff00", "#ff00ff", "#ff8800",
+                  "#88ff00", "#0088ff", "#ff0088"]
+
+        for i, (depth_key, data) in enumerate(sorted(measurements.items(),
+                                                       key=lambda x: float(x[0]))):
+            color = QColor(colors[i % len(colors)])
+            pen = QPen(color)
+            pen.setWidth(2)
+
+            y_pos = data.get('y_position', 0)
+            left_x = data.get('left_edge_x', 0)
+            right_x = data.get('right_edge_x', 0)
+            thickness = data.get('thickness_nm', 0)
+            depth = data.get('depth_nm', float(depth_key))
+
+            if y_pos == 0 or left_x == right_x:
+                continue
+
+            # Dashed guide line across full width
+            dash_pen = QPen(color)
+            dash_pen.setWidth(1)
+            dash_pen.setStyle(Qt.PenStyle.DashLine)
+            guide = self.scene.addLine(0, y_pos, w, y_pos, dash_pen)
+            self._result_overlay_items.append(guide)
+
+            # Solid measurement line between edges
+            thick_pen = QPen(color)
+            thick_pen.setWidth(3)
+            mline = self.scene.addLine(left_x, y_pos, right_x, y_pos, thick_pen)
+            self._result_overlay_items.append(mline)
+
+            # Edge markers (circles)
+            for ex in [left_x, right_x]:
+                marker = self.scene.addEllipse(
+                    ex - 5, y_pos - 5, 10, 10,
+                    pen, QBrush(color)
+                )
+                self._result_overlay_items.append(marker)
+
+                # Vertical edge indicator
+                edge_line = self.scene.addLine(ex, y_pos - 12, ex, y_pos + 12, pen)
+                self._result_overlay_items.append(edge_line)
+
+            # Ruler ticks between edges
+            num_ticks = 5
+            if right_x > left_x:
+                tick_spacing = (right_x - left_x) / num_ticks
+                thin_pen = QPen(color)
+                thin_pen.setWidth(1)
+                for t in range(num_ticks + 1):
+                    tx = left_x + t * tick_spacing
+                    tick = self.scene.addLine(tx, y_pos - 4, tx, y_pos + 4, thin_pen)
+                    self._result_overlay_items.append(tick)
+
+            # Label with measurement value
+            label_text = f"@{depth:.0f}nm: {thickness:.2f}nm"
+            std = data.get('thickness_std', 0)
+            if std > 0:
+                label_text += f" \u00b1{std:.2f}"
+
+            text = self.scene.addText(label_text, QFont("Arial", 9))
+            text.setDefaultTextColor(color)
+            text_x = min(right_x + 15, w - 200)
+            text.setPos(text_x, y_pos - 8)
+            self._result_overlay_items.append(text)
+
+            # Depth ruler from baseline (vertical line)
+            if baseline_y > 0 and y_pos > baseline_y:
+                depth_pen = QPen(color)
+                depth_pen.setWidth(1)
+                depth_pen.setStyle(Qt.PenStyle.DashDotLine)
+                vline = self.scene.addLine(left_x - 20, baseline_y, left_x - 20, y_pos, depth_pen)
+                self._result_overlay_items.append(vline)
+
+                # Depth label
+                depth_label = self.scene.addText(f"{depth:.0f}nm", QFont("Arial", 7))
+                depth_label.setDefaultTextColor(color)
+                depth_label.setPos(left_x - 55, (baseline_y + y_pos) / 2 - 8)
+                self._result_overlay_items.append(depth_label)
+
+    def clear_result_overlays(self):
+        """Clear all analysis result overlay items"""
+        for item in self._result_overlay_items:
+            self.scene.removeItem(item)
+        self._result_overlay_items = []
+
     def clear_measurement_overlays(self):
         """Clear all measurement overlays"""
         for item in self._measurement_items:
@@ -559,12 +905,7 @@ class ImageViewerWidget(QWidget):
         self._measurement_items = []
 
     def set_measurement_mode(self, mode: str):
-        """
-        Set measurement mode.
-
-        Args:
-            mode: 'none', 'baseline', 'horizontal', 'vertical', 'free'
-        """
+        """Set measurement mode."""
         mode_map = {
             'none': ImageGraphicsView.MODE_PAN,
             'baseline': ImageGraphicsView.MODE_BASELINE,
@@ -576,7 +917,6 @@ class ImageViewerWidget(QWidget):
 
     def _on_measurement_ended(self, start: QPointF, end: QPointF):
         """Handle completed measurement"""
-        # Determine mode from current view mode
         mode_map = {
             ImageGraphicsView.MODE_MEASURE_HORIZONTAL: 'horizontal',
             ImageGraphicsView.MODE_MEASURE_VERTICAL: 'vertical',
@@ -586,6 +926,9 @@ class ImageViewerWidget(QWidget):
 
         # Draw the measurement
         self._draw_manual_measurement(start, end, mode)
+
+        # Save for undo
+        self._undo_stack.append(('measurement', len(self._manual_measurement_items)))
 
         # Emit signal
         self.measurement_completed.emit(start, end, mode)
@@ -612,7 +955,7 @@ class ImageViewerWidget(QWidget):
             )
             self._manual_measurement_items.append(marker)
 
-        # Calculate and display distance
+        # Calculate distance
         dx = end.x() - start.x()
         dy = end.y() - start.y()
 
@@ -648,13 +991,38 @@ class ImageViewerWidget(QWidget):
             self.scene.removeItem(item)
         self._manual_measurement_items = []
 
-    def rotate_image(self, angle: float):
-        """
-        Rotate the displayed image.
+    def undo(self):
+        """Undo last action"""
+        if not self._undo_stack:
+            return
 
-        Args:
-            angle: Rotation angle in degrees (positive = counter-clockwise)
-        """
+        action = self._undo_stack.pop()
+
+        if action[0] == 'measurement':
+            # Remove last measurement items (4 items per measurement: line + 2 markers + text)
+            items_to_remove = min(4, len(self._manual_measurement_items))
+            for _ in range(items_to_remove):
+                if self._manual_measurement_items:
+                    item = self._manual_measurement_items.pop()
+                    self.scene.removeItem(item)
+
+        elif action[0] == 'baseline_set':
+            old_y = action[1]
+            if old_y is not None:
+                self._baseline_y = old_y
+                self._draw_baseline(old_y)
+            else:
+                self.delete_baseline()
+
+        elif action[0] == 'baseline':
+            # Restore deleted baseline
+            old_y = action[1]
+            if old_y is not None:
+                self._baseline_y = old_y
+                self._draw_baseline(old_y)
+
+    def rotate_image(self, angle: float):
+        """Rotate the displayed image."""
         if self._image_data is None:
             return
 
@@ -662,24 +1030,15 @@ class ImageViewerWidget(QWidget):
 
         self._current_rotation = angle
 
-        # Rotate original image
         h, w = self._image_data.shape[:2]
         center = (w // 2, h // 2)
         matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
 
-        # Rotate
-        if len(self._image_data.shape) == 2:
-            rotated = cv2.warpAffine(
-                self._image_data, matrix, (w, h),
-                borderMode=cv2.BORDER_REFLECT
-            )
-        else:
-            rotated = cv2.warpAffine(
-                self._image_data, matrix, (w, h),
-                borderMode=cv2.BORDER_REFLECT
-            )
+        rotated = cv2.warpAffine(
+            self._image_data, matrix, (w, h),
+            borderMode=cv2.BORDER_REFLECT
+        )
 
-        # Update display
         self._update_display(rotated)
         self.image_rotated.emit(angle)
 
@@ -687,21 +1046,18 @@ class ImageViewerWidget(QWidget):
         """Update the displayed image"""
         self._display_data = data
 
-        # Convert to display format
         if len(data.shape) == 3:
             display_data = data[:, :, :3] if data.shape[2] >= 3 else data[:, :, 0]
         else:
             display_data = data
 
-        # Normalize to 0-255
         if display_data.dtype != np.uint8:
-            dmin, dmax = display_data.min(), display_data.max()
+            dmin, dmax = float(display_data.min()), float(display_data.max())
             if dmax > dmin:
                 display_data = ((display_data - dmin) / (dmax - dmin) * 255).astype(np.uint8)
             else:
                 display_data = np.zeros_like(display_data, dtype=np.uint8)
 
-        # Create QImage
         h, w = display_data.shape[:2]
         if len(display_data.shape) == 2:
             qimage = QImage(
@@ -716,33 +1072,30 @@ class ImageViewerWidget(QWidget):
             )
 
         # Update scene
-        # Find and update pixmap item
         for item in self.scene.items():
             if isinstance(item, QGraphicsPixmapItem):
                 item.setPixmap(QPixmap.fromImage(qimage))
                 break
         else:
-            # No pixmap found, add new one
             self.scene.clear()
             self._baseline_line = None
             self._baseline_text = None
             self._measurement_items = []
             self._manual_measurement_items = []
+            self._result_overlay_items = []
+            self._grid_items = []
 
             pixmap = QPixmap.fromImage(qimage)
             self.scene.addPixmap(pixmap)
             self.scene.setSceneRect(QRectF(pixmap.rect()))
 
-        # Redraw baseline if set
         if self._baseline_y is not None:
             self._draw_baseline(self._baseline_y)
 
     def get_scale_nm_per_pixel(self) -> float:
-        """Get current scale in nm/pixel"""
         return self._scale_nm_per_pixel
 
     def set_scale_nm_per_pixel(self, scale: float):
-        """Set scale in nm/pixel"""
         self._scale_nm_per_pixel = scale
         if self._image_path:
             self.info_label.setText(
@@ -752,9 +1105,7 @@ class ImageViewerWidget(QWidget):
             )
 
     def get_image_data(self) -> Optional[np.ndarray]:
-        """Get current image data"""
         return self._display_data if self._display_data is not None else self._image_data
 
     def get_current_rotation(self) -> float:
-        """Get current rotation angle"""
         return self._current_rotation

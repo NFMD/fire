@@ -18,7 +18,7 @@ from loguru import logger
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.image_loader import TIFFLoader, ScaleInfo
+from core.image_loader import TIFFLoader, ScaleInfo, UniversalImageLoader
 from core.preprocessor import ImagePreprocessor
 from core.baseline_detector import BaselineDetector, BaselineInfo
 from core.thickness_measurer import (
@@ -125,8 +125,8 @@ class InferencePipeline:
         """
         self.config = config or PipelineConfig()
 
-        # Initialize components
-        self.loader = TIFFLoader()
+        # Initialize components (UniversalImageLoader supports TIFF, DM3, DM4)
+        self.loader = UniversalImageLoader()
         self.preprocessor = ImagePreprocessor()
         self.baseline_detector = BaselineDetector()
 
@@ -365,6 +365,9 @@ class InferencePipeline:
         # Cleanup
         gc.collect()
 
+        # Final safety: convert ALL numpy types to native Python types
+        result = convert_numpy_types(result)
+
         return result
 
     def process_batch(
@@ -495,20 +498,21 @@ class InferencePipeline:
 
     def _image_result_to_dict(self, result: ImageResult) -> Dict[str, Any]:
         """Convert ImageResult to dictionary"""
-        return {
-            'source_path': result.path,
-            'success': result.success,
-            'processing_time_ms': result.processing_time_ms,
+        data = {
+            'source_path': str(result.path),
+            'success': bool(result.success),
+            'processing_time_ms': float(result.processing_time_ms) if result.processing_time_ms else None,
             'scale_nm_per_pixel': (
-                result.scale_info.scale_nm_per_pixel if result.scale_info else None
+                float(result.scale_info.scale_nm_per_pixel) if result.scale_info else None
             ),
             'baseline_y': (
-                result.baseline_info.y_position if result.baseline_info else None
+                int(result.baseline_info.y_position) if result.baseline_info else None
             ),
             'measurements': {
-                depth: m.to_dict() for depth, m in result.measurements.items()
+                str(depth): m.to_dict() for depth, m in result.measurements.items()
             } if result.measurements else {}
         }
+        return convert_numpy_types(data)
 
 
 def create_pipeline(

@@ -319,6 +319,8 @@ class ModelTrainingWidget(QWidget):
         self.model_combo.addItems([
             'CD Measurement (Recommended)',
             'Edge Segmentation',
+            'EfficientNet CD (Transfer Learning)',
+            'EfficientNet Edge (Transfer Learning)',
             'Ensemble (3 models)'
         ])
         config_layout.addRow("Model Type:", self.model_combo)
@@ -447,6 +449,8 @@ class ModelTrainingWidget(QWidget):
         model_map = {
             'CD Measurement (Recommended)': 'cd_measurement',
             'Edge Segmentation': 'edge_segmentation',
+            'EfficientNet CD (Transfer Learning)': 'efficientnet_cd',
+            'EfficientNet Edge (Transfer Learning)': 'efficientnet_edge',
             'Ensemble (3 models)': 'ensemble',
         }
 

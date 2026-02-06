@@ -102,6 +102,7 @@ class AnalysisWorker(QThread):
                 self.progress.emit(i, total, f"Processing {Path(path).name} {mode_str}...")
 
                 try:
+                    from core.result_exporter import convert_numpy_types
                     result = pipeline.process_single(
                         image_path=path,
                         baseline_hint_y=self.settings.get('baseline_y'),
@@ -109,6 +110,7 @@ class AnalysisWorker(QThread):
                         save_result=True,
                         use_enhanced=use_enhanced
                     )
+                    result = convert_numpy_types(result)
                     results.append(result)
                     self.image_completed.emit(result)
                 except Exception as e:
@@ -500,7 +502,7 @@ class MainWindow(QMainWindow):
             self,
             "Open HR-TEM Images",
             "",
-            "TIFF Images (*.tif *.tiff);;All Files (*.*)"
+            "TEM Images (*.tif *.tiff *.dm3 *.dm4);;TIFF Images (*.tif *.tiff);;Gatan DM (*.dm3 *.dm4);;All Files (*.*)"
         )
         if files:
             self._add_images(files)
@@ -513,14 +515,15 @@ class MainWindow(QMainWindow):
         )
         if folder:
             folder_path = Path(folder)
-            files = list(folder_path.glob("*.tif")) + list(folder_path.glob("*.tiff"))
+            files = (list(folder_path.glob("*.tif")) + list(folder_path.glob("*.tiff"))
+                    + list(folder_path.glob("*.dm3")) + list(folder_path.glob("*.dm4")))
             if files:
                 self._add_images([str(f) for f in sorted(files)])
             else:
                 QMessageBox.warning(
                     self,
                     "No Images Found",
-                    "No TIFF images found in the selected folder."
+                    "No supported images (TIFF/DM3/DM4) found in the selected folder."
                 )
 
     def _add_images(self, paths: List[str]):
@@ -535,7 +538,7 @@ class MainWindow(QMainWindow):
 
     def _on_files_dropped(self, paths: List[str]):
         """Handle files dropped onto the file list"""
-        tiff_files = [p for p in paths if p.lower().endswith(('.tif', '.tiff'))]
+        tiff_files = [p for p in paths if p.lower().endswith(('.tif', '.tiff', '.dm3', '.dm4'))]
         if tiff_files:
             self._add_images(tiff_files)
 
@@ -674,6 +677,10 @@ class MainWindow(QMainWindow):
                 scale = result.get('scale_info', {}).get('scale_nm_per_pixel', 1.0)
                 self.fft_viewer.set_fft_results(result['fft_analysis'], scale)
 
+            # Show result overlay on current image if it matches
+            if self.current_image_path and result['source_path'] == self.current_image_path:
+                self.image_viewer.add_result_overlay(result)
+
     def _on_export_results(self):
         """Export results to file"""
         if not self.results:
@@ -758,7 +765,7 @@ class MainWindow(QMainWindow):
             return
 
         # Get training data directory from training panel
-        data_dir = self.training_panel.training_data_widget.data_dir_edit.text()
+        data_dir = self.training_panel.data_widget.dir_edit.text()
         if not data_dir:
             QMessageBox.information(
                 self,
@@ -825,7 +832,7 @@ class MainWindow(QMainWindow):
                     f"Directory: {data_dir}"
                 )
                 # Refresh training panel statistics
-                self.training_panel.training_data_widget._update_statistics()
+                self.training_panel.data_widget._refresh_stats()
             else:
                 QMessageBox.warning(
                     self,

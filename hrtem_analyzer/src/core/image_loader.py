@@ -1,11 +1,10 @@
 """
-TIFF Image Loader with Scale Information Extraction
+TEM Image Loader with Scale Information Extraction
 
-Supports various TEM manufacturers:
-- FEI/Thermo Fisher
-- JEOL
-- Hitachi
-- Zeiss
+Supports file formats:
+- TIFF (.tif, .tiff) - FEI/Thermo Fisher, JEOL, Hitachi, Zeiss
+- DM3 (.dm3) - Gatan Digital Micrograph 3
+- DM4 (.dm4) - Gatan Digital Micrograph 4
 """
 import re
 from dataclasses import dataclass
@@ -271,3 +270,64 @@ class TIFFLoader:
                 'size_mb': path.stat().st_size / (1024 * 1024),
                 'scale': scale_info.to_dict(),
             }
+
+
+class UniversalImageLoader:
+    """
+    Universal image loader supporting TIFF, DM3, and DM4 formats.
+
+    Automatically detects file format and uses the appropriate loader.
+    """
+
+    SUPPORTED_EXTENSIONS = {
+        '.tif', '.tiff',  # TIFF
+        '.dm3', '.dm4',   # Gatan Digital Micrograph
+    }
+
+    def __init__(self, default_scale_nm: float = 1.0):
+        self.default_scale_nm = default_scale_nm
+        self.tiff_loader = TIFFLoader(default_scale_nm)
+
+    def can_load(self, path: str) -> bool:
+        """Check if file format is supported"""
+        return Path(path).suffix.lower() in self.SUPPORTED_EXTENSIONS
+
+    def load(self, path: str, normalize: bool = True,
+             target_dtype: np.dtype = np.float32) -> Tuple[np.ndarray, ScaleInfo]:
+        """
+        Load image from any supported format.
+
+        Args:
+            path: Path to image file
+            normalize: Normalize to 0-1 range
+            target_dtype: Target data type
+
+        Returns:
+            Tuple of (image_array, scale_info)
+        """
+        ext = Path(path).suffix.lower()
+
+        if ext in ('.dm3', '.dm4'):
+            return self._load_dm(path, normalize, target_dtype)
+        else:
+            return self.tiff_loader.load(path, normalize, target_dtype)
+
+    def _load_dm(self, path: str, normalize: bool,
+                 target_dtype: np.dtype) -> Tuple[np.ndarray, ScaleInfo]:
+        """Load DM3/DM4 file"""
+        from .dm_loader import DMFileLoader
+
+        dm_loader = DMFileLoader()
+        image, dm_scale = dm_loader.load(path, normalize)
+
+        # Convert DMScaleInfo to ScaleInfo
+        scale_nm = dm_loader.get_scale_nm_per_pixel(dm_scale)
+        scale_info = ScaleInfo(
+            scale_nm_per_pixel=scale_nm,
+            unit=dm_scale.unit_x or "nm",
+            source=f"dm{Path(path).suffix[-1]}_metadata",
+            pixel_size_x=dm_scale.scale_x,
+            pixel_size_y=dm_scale.scale_y,
+        )
+
+        return image.astype(target_dtype), scale_info

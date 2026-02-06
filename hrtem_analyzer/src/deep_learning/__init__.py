@@ -25,6 +25,7 @@ from .models import (
     get_device,
     CDMeasurementNet,
     EdgeSegmentationNet,
+    EfficientNetEncoder,
     EnsembleModel,
     MODEL_INFO,
 )
@@ -59,6 +60,7 @@ __all__ = [
     'get_device',
     'CDMeasurementNet',
     'EdgeSegmentationNet',
+    'EfficientNetEncoder',
     'EnsembleModel',
     'MODEL_INFO',
     # Dataset

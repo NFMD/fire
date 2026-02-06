@@ -147,6 +147,101 @@ class LightweightEncoder(nn.Module):
         return features
 
 
+class EfficientNetEncoder(nn.Module):
+    """
+    EfficientNet-B0 encoder with ImageNet transfer learning.
+
+    Uses torchvision's pretrained EfficientNet-B0 as backbone.
+    First conv layer is adapted for single-channel grayscale input
+    by averaging the pretrained RGB weights.
+
+    Based on: "EfficientNet: Rethinking Model Scaling for CNNs" (Tan & Le, 2019)
+    Applied approach from unet-compare (PSU RDMAP) for TEM defect segmentation.
+    """
+
+    def __init__(self, in_channels: int = 1, pretrained: bool = True):
+        super().__init__()
+
+        try:
+            from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+            if pretrained:
+                backbone = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
+            else:
+                backbone = efficientnet_b0(weights=None)
+        except ImportError:
+            # Fallback: try older torchvision API
+            try:
+                from torchvision.models import efficientnet_b0
+                backbone = efficientnet_b0(pretrained=pretrained)
+            except Exception:
+                raise ImportError(
+                    "torchvision is required for EfficientNet backbone. "
+                    "Install with: pip install torchvision"
+                )
+
+        features = backbone.features
+
+        # Adapt first conv for single-channel input
+        if in_channels != 3:
+            original_conv = features[0][0]
+            new_conv = nn.Conv2d(
+                in_channels, original_conv.out_channels,
+                kernel_size=original_conv.kernel_size,
+                stride=original_conv.stride,
+                padding=original_conv.padding,
+                bias=original_conv.bias is not None
+            )
+            if pretrained:
+                # Average RGB weights for grayscale
+                with torch.no_grad():
+                    new_conv.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
+                    if original_conv.bias is not None:
+                        new_conv.bias.data = original_conv.bias.data
+            features[0][0] = new_conv
+
+        # Split into stages for multi-scale feature extraction
+        # EfficientNet-B0 features structure:
+        # [0] stem (Conv+BN+SiLU) -> 32ch, stride 2
+        # [1] MBConv1 -> 16ch, stride 1
+        # [2] MBConv6 -> 24ch, stride 2
+        # [3] MBConv6 -> 40ch, stride 2
+        # [4] MBConv6 -> 80ch, stride 2
+        # [5] MBConv6 -> 112ch, stride 1
+        # [6] MBConv6 -> 192ch, stride 2
+        # [7] MBConv6 -> 320ch, stride 1
+        # [8] final conv -> 1280ch
+
+        self.stage0 = nn.Sequential(features[0], features[1])  # 1/2, 16ch
+        self.stage1 = features[2]   # 1/4, 24ch
+        self.stage2 = features[3]   # 1/8, 40ch
+        self.stage3 = nn.Sequential(features[4], features[5])  # 1/16, 112ch
+        self.stage4 = nn.Sequential(features[6], features[7])  # 1/32, 320ch
+
+        # Feature channels at each stage (for decoder compatibility)
+        self.feature_channels = [16, 24, 40, 112, 320]
+
+    def forward(self, x) -> List[torch.Tensor]:
+        """Returns feature maps at multiple scales"""
+        features = []
+
+        x = self.stage0(x)
+        features.append(x)  # 1/2, 16ch
+
+        x = self.stage1(x)
+        features.append(x)  # 1/4, 24ch
+
+        x = self.stage2(x)
+        features.append(x)  # 1/8, 40ch
+
+        x = self.stage3(x)
+        features.append(x)  # 1/16, 112ch
+
+        x = self.stage4(x)
+        features.append(x)  # 1/32, 320ch
+
+        return features
+
+
 class LightweightDecoder(nn.Module):
     """Lightweight decoder for segmentation"""
 
@@ -199,12 +294,15 @@ class EdgeSegmentationNet(nn.Module):
     Input: Grayscale HR-TEM image
     Output: Edge probability map
 
-    Architecture: Lightweight U-Net with MobileNetV3-style encoder
+    Architecture: U-Net with configurable encoder (MobileNetV3 or EfficientNet-B0)
     """
 
-    def __init__(self, in_channels: int = 1):
+    def __init__(self, in_channels: int = 1, backbone: str = 'mobilenet'):
         super().__init__()
-        self.encoder = LightweightEncoder(in_channels)
+        if backbone == 'efficientnet':
+            self.encoder = EfficientNetEncoder(in_channels, pretrained=True)
+        else:
+            self.encoder = LightweightEncoder(in_channels)
         self.decoder = LightweightDecoder(self.encoder.feature_channels, out_channels=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -269,10 +367,13 @@ class CDMeasurementNet(nn.Module):
         - confidence: Prediction confidence (B, num_depths)
     """
 
-    def __init__(self, in_channels: int = 1, num_depths: int = 5):
+    def __init__(self, in_channels: int = 1, num_depths: int = 5, backbone: str = 'mobilenet'):
         super().__init__()
 
-        self.encoder = LightweightEncoder(in_channels)
+        if backbone == 'efficientnet':
+            self.encoder = EfficientNetEncoder(in_channels, pretrained=True)
+        else:
+            self.encoder = LightweightEncoder(in_channels)
         self.edge_decoder = LightweightDecoder(self.encoder.feature_channels, out_channels=1)
         self.cd_head = CDRegressionHead(self.encoder.feature_channels, num_depths)
 
@@ -287,6 +388,7 @@ class CDMeasurementNet(nn.Module):
         )
 
         self.num_depths = num_depths
+        self.backbone_name = backbone
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         features = self.encoder(x)
@@ -353,6 +455,7 @@ class EnsembleModel(nn.Module):
 
 def create_model(model_type: str = 'cd_measurement',
                  num_depths: int = 5,
+                 backbone: str = 'mobilenet',
                  pretrained_path: Optional[str] = None) -> nn.Module:
     """
     Factory function to create models.
@@ -360,22 +463,27 @@ def create_model(model_type: str = 'cd_measurement',
     Args:
         model_type: 'edge_segmentation', 'cd_measurement', or 'ensemble'
         num_depths: Number of depth measurements
+        backbone: 'mobilenet' (lightweight) or 'efficientnet' (transfer learning)
         pretrained_path: Path to pretrained weights
 
     Returns:
         Model instance
     """
     if model_type == 'edge_segmentation':
-        model = EdgeSegmentationNet(in_channels=1)
+        model = EdgeSegmentationNet(in_channels=1, backbone=backbone)
     elif model_type == 'cd_measurement':
-        model = CDMeasurementNet(in_channels=1, num_depths=num_depths)
+        model = CDMeasurementNet(in_channels=1, num_depths=num_depths, backbone=backbone)
     elif model_type == 'ensemble':
         model = EnsembleModel(num_models=3, in_channels=1, num_depths=num_depths)
+    elif model_type == 'efficientnet_cd':
+        model = CDMeasurementNet(in_channels=1, num_depths=num_depths, backbone='efficientnet')
+    elif model_type == 'efficientnet_edge':
+        model = EdgeSegmentationNet(in_channels=1, backbone='efficientnet')
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
     if pretrained_path:
-        state_dict = torch.load(pretrained_path, map_location='cpu')
+        state_dict = torch.load(pretrained_path, map_location='cpu', weights_only=True)
         model.load_state_dict(state_dict)
 
     return model
@@ -385,17 +493,31 @@ def create_model(model_type: str = 'cd_measurement',
 MODEL_INFO = {
     'edge_segmentation': {
         'name': 'Edge Segmentation',
-        'description': 'Detects edges in HR-TEM images',
+        'description': 'Detects edges in HR-TEM images (MobileNet)',
         'params': '~500K',
         'input': 'Grayscale image',
         'output': 'Edge probability map',
     },
     'cd_measurement': {
         'name': 'CD Measurement',
-        'description': 'Direct Critical Dimension prediction',
+        'description': 'Direct CD prediction (MobileNet)',
         'params': '~800K',
         'input': 'Grayscale image + depth config',
         'output': 'CD values at each depth',
+    },
+    'efficientnet_cd': {
+        'name': 'EfficientNet CD',
+        'description': 'CD prediction with EfficientNet-B0 + ImageNet transfer learning',
+        'params': '~5.3M',
+        'input': 'Grayscale image + depth config',
+        'output': 'CD values at each depth (higher accuracy)',
+    },
+    'efficientnet_edge': {
+        'name': 'EfficientNet Edge',
+        'description': 'Edge segmentation with EfficientNet-B0 backbone',
+        'params': '~5.0M',
+        'input': 'Grayscale image',
+        'output': 'Edge probability map (higher accuracy)',
     },
     'ensemble': {
         'name': 'Ensemble Model',
