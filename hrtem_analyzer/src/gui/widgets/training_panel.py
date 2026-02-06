@@ -45,34 +45,153 @@ class TrainingWorker(QThread):
 
     def run(self):
         try:
-            from deep_learning import train_model, TrainingConfig
+            use_advanced = self.config.get('use_advanced_trainer', False)
+            model_type = self.config.get('model_type', 'cd_measurement')
 
-            config = TrainingConfig(
-                epochs=self.config.get('epochs', 50),
-                batch_size=self.config.get('batch_size', 8),
-                learning_rate=self.config.get('learning_rate', 0.001),
-                model_type=self.config.get('model_type', 'cd_measurement'),
-                checkpoint_dir=self.config.get('output_dir', 'trained_models'),
-            )
+            if use_advanced:
+                # Use advanced trainer for SOTA models
+                from deep_learning import (
+                    ADVANCED_MODELS_AVAILABLE,
+                    create_advanced_model,
+                    AdvancedTrainer,
+                    AdvancedTrainerConfig,
+                    EnsembleTrainer,
+                    TrainingDataManager,
+                )
+                from deep_learning.dataset import CDDataset
+                from torch.utils.data import DataLoader, random_split
+                import torch
 
-            def progress_callback(info):
-                if self._is_cancelled:
-                    raise InterruptedError("Training cancelled")
-                self.progress.emit(info)
+                if not ADVANCED_MODELS_AVAILABLE:
+                    raise ImportError("Advanced models not available. Check PyTorch installation.")
 
-            results = train_model(
-                self.data_dir,
-                config.checkpoint_dir,
-                config,
-                progress_callback
-            )
+                # Load data
+                manager = TrainingDataManager(self.data_dir)
+                annotations = manager.get_all_annotations()
+
+                if len(annotations) < 5:
+                    raise ValueError(f"Need at least 5 training samples, found {len(annotations)}")
+
+                dataset = CDDataset(self.data_dir, annotations)
+
+                # Split into train/val
+                train_size = int(0.8 * len(dataset))
+                val_size = len(dataset) - train_size
+                train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+                # Create data loaders
+                train_loader = DataLoader(train_dataset, batch_size=self.config.get('batch_size', 8),
+                                          shuffle=True, num_workers=0)
+                val_loader = DataLoader(val_dataset, batch_size=self.config.get('batch_size', 8),
+                                        shuffle=False, num_workers=0)
+
+                # Training config
+                trainer_config = AdvancedTrainerConfig(
+                    model_type=model_type,
+                    epochs=self.config.get('epochs', 100),
+                    batch_size=self.config.get('batch_size', 8),
+                    learning_rate=self.config.get('learning_rate', 0.0001),
+                    use_amp=True,
+                    deep_supervision=True,
+                    patience=20,
+                    log_dir=self.config.get('output_dir', 'trained_models'),
+                    experiment_name=f'hrtem_{model_type}',
+                )
+
+                # Check for ensemble models
+                if model_type.startswith('ensemble_'):
+                    base_type = model_type.replace('ensemble_', '')
+                    trainer_config.num_ensemble = 5
+
+                    ensemble_trainer = EnsembleTrainer(
+                        model_class=lambda **kw: create_advanced_model(base_type, **kw),
+                        config=trainer_config,
+                        train_dataset=train_dataset,
+                        val_dataset=val_dataset,
+                        in_channels=1,
+                        out_channels=1
+                    )
+
+                    # Train with progress
+                    for epoch in range(trainer_config.epochs):
+                        if self._is_cancelled:
+                            raise InterruptedError("Training cancelled")
+                        self.progress.emit({
+                            'epoch': epoch + 1,
+                            'total_epochs': trainer_config.epochs,
+                            'status': f'Training ensemble (member updates)...'
+                        })
+
+                    histories = ensemble_trainer.train()
+                    ensemble_trainer.save(trainer_config.log_dir + '/' + trainer_config.experiment_name)
+
+                    results = {
+                        'model_type': model_type,
+                        'histories': [h for h in histories],
+                        'model_path': trainer_config.log_dir + '/' + trainer_config.experiment_name
+                    }
+                else:
+                    # Single advanced model
+                    model = create_advanced_model(model_type, in_channels=1, out_channels=1)
+
+                    trainer = AdvancedTrainer(
+                        model=model,
+                        config=trainer_config,
+                        train_loader=train_loader,
+                        val_loader=val_loader
+                    )
+
+                    def progress_callback(trainer_obj, epoch, train_metrics, val_metrics):
+                        if self._is_cancelled:
+                            raise InterruptedError("Training cancelled")
+                        self.progress.emit({
+                            'epoch': epoch + 1,
+                            'total_epochs': trainer_config.epochs,
+                            'train_loss': train_metrics['loss'],
+                            'val_loss': val_metrics['loss'],
+                            'lr': trainer_obj.scheduler.get_lr()[0]
+                        })
+
+                    history = trainer.train(callbacks=[progress_callback])
+
+                    results = {
+                        'model_type': model_type,
+                        'history': history,
+                        'best_val_loss': trainer.best_val_loss,
+                        'model_path': trainer_config.log_dir + '/' + trainer_config.experiment_name
+                    }
+
+            else:
+                # Use standard trainer
+                from deep_learning import train_model, TrainingConfig
+
+                config = TrainingConfig(
+                    epochs=self.config.get('epochs', 50),
+                    batch_size=self.config.get('batch_size', 8),
+                    learning_rate=self.config.get('learning_rate', 0.001),
+                    model_type=model_type,
+                    checkpoint_dir=self.config.get('output_dir', 'trained_models'),
+                )
+
+                def progress_callback(info):
+                    if self._is_cancelled:
+                        raise InterruptedError("Training cancelled")
+                    self.progress.emit(info)
+
+                results = train_model(
+                    self.data_dir,
+                    config.checkpoint_dir,
+                    config,
+                    progress_callback
+                )
 
             self.finished.emit(results)
 
         except InterruptedError:
             self.error.emit("Training cancelled by user")
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
 
 
 class TrainingDataWidget(QWidget):
@@ -321,13 +440,19 @@ class ModelTrainingWidget(QWidget):
             'Edge Segmentation',
             'EfficientNet CD (Transfer Learning)',
             'EfficientNet Edge (Transfer Learning)',
-            'Ensemble (3 models)'
+            'Ensemble (3 models)',
+            '--- Advanced (High Accuracy) ---',
+            'Attention U-Net (SOTA)',
+            'Swin Transformer U-Net (SOTA)',
+            'Deep Ensemble - Attention (5 models)',
+            'Deep Ensemble - Swin (5 models)',
+            'Hybrid CNN-Transformer'
         ])
         config_layout.addRow("Model Type:", self.model_combo)
 
         self.epochs_spin = QSpinBox()
         self.epochs_spin.setRange(10, 500)
-        self.epochs_spin.setValue(50)
+        self.epochs_spin.setValue(100)  # Increased default for better training
         config_layout.addRow("Epochs:", self.epochs_spin)
 
         self.batch_spin = QSpinBox()
@@ -452,14 +577,33 @@ class ModelTrainingWidget(QWidget):
             'EfficientNet CD (Transfer Learning)': 'efficientnet_cd',
             'EfficientNet Edge (Transfer Learning)': 'efficientnet_edge',
             'Ensemble (3 models)': 'ensemble',
+            # Advanced models (SOTA)
+            'Attention U-Net (SOTA)': 'attention_unet',
+            'Swin Transformer U-Net (SOTA)': 'swin_unet',
+            'Deep Ensemble - Attention (5 models)': 'ensemble_attention',
+            'Deep Ensemble - Swin (5 models)': 'ensemble_swin',
+            'Hybrid CNN-Transformer': 'hybrid_cd',
         }
+
+        selected_model = self.model_combo.currentText()
+
+        # Skip separator items
+        if selected_model.startswith('---'):
+            QMessageBox.warning(self, "Invalid Selection", "Please select a valid model type.")
+            return
 
         config = {
             'epochs': self.epochs_spin.value(),
             'batch_size': self.batch_spin.value(),
             'learning_rate': self.lr_spin.value(),
-            'model_type': model_map.get(self.model_combo.currentText(), 'cd_measurement'),
+            'model_type': model_map.get(selected_model, 'cd_measurement'),
             'output_dir': self.output_edit.text(),
+            # Advanced training options
+            'use_advanced_trainer': selected_model in [
+                'Attention U-Net (SOTA)', 'Swin Transformer U-Net (SOTA)',
+                'Deep Ensemble - Attention (5 models)', 'Deep Ensemble - Swin (5 models)',
+                'Hybrid CNN-Transformer'
+            ],
         }
 
         self.worker = TrainingWorker(self.data_dir, config)

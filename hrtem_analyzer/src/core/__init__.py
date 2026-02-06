@@ -1,5 +1,13 @@
 """
 Core modules for HR-TEM analysis
+
+Includes:
+- Image loading (TIFF, DM3/DM4)
+- Preprocessing and denoising
+- Edge detection and measurement
+- Scale bar detection (OCR)
+- Advanced sub-pixel analysis
+- Phase congruency edge detection
 """
 from .image_loader import TIFFLoader, UniversalImageLoader, ScaleInfo
 from .preprocessor import ImagePreprocessor
@@ -26,10 +34,29 @@ from .precision_measurement import (
     SubPixelMethod,
     SubPixelEdgeDetector,
     ESFLSFAnalyzer,
-    AdvancedDenoiser,
+    AdvancedDenoiser as PrecisionDenoiser,
     MultiScaleWaveletAnalyzer,
     MonteCarloUncertainty,
     AtomicColumnFitter,
+)
+
+# State-of-the-art edge fitting
+from .advanced_edge_fitting import (
+    ESFLSFFitter,
+    GaussianProcessEdgeFitter,
+    WaveletEdgeFitter,
+    MCMCEdgeFitter,
+    EnsembleEdgeFitter,
+    EdgeFitResult,
+    fit_edge_profile,
+)
+
+# Advanced denoising and phase congruency
+from .advanced_denoising import (
+    AdvancedDenoiser,
+    PhaseCongruencyEdgeDetector,
+    denoise_tem_image,
+    detect_edges_phase_congruency,
 )
 
 __all__ = [
@@ -61,8 +88,21 @@ __all__ = [
     'SubPixelMethod',
     'SubPixelEdgeDetector',
     'ESFLSFAnalyzer',
-    'AdvancedDenoiser',
+    'PrecisionDenoiser',
     'MultiScaleWaveletAnalyzer',
     'MonteCarloUncertainty',
     'AtomicColumnFitter',
+    # State-of-the-art edge fitting
+    'ESFLSFFitter',
+    'GaussianProcessEdgeFitter',
+    'WaveletEdgeFitter',
+    'MCMCEdgeFitter',
+    'EnsembleEdgeFitter',
+    'EdgeFitResult',
+    'fit_edge_profile',
+    # Advanced denoising
+    'AdvancedDenoiser',
+    'PhaseCongruencyEdgeDetector',
+    'denoise_tem_image',
+    'detect_edges_phase_congruency',
 ]
